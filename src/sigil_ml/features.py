@@ -232,3 +232,65 @@ def extract_duration_features(db_path: str | Path, task_id: str) -> dict[str, fl
         "time_of_day_hour": float(hour),
         "branch_name_length": branch_name_length,
     }
+
+
+def extract_features_from_buffer(events: list[dict]) -> dict[str, float]:
+    """Extract stuck-predictor features from a raw event buffer.
+
+    Used by the poller when no active task_id exists (between tasks,
+    idle phases). Returns the same shape as extract_stuck_features so
+    it is compatible with StuckPredictor.
+
+    Args:
+        events: List of raw event dicts from the polling buffer.
+                Each dict has keys: id, kind, source, payload (parsed), ts.
+    """
+    if not events:
+        return {
+            "test_failure_count": 0.0,
+            "time_in_phase_sec": 0.0,
+            "edit_velocity": 0.0,
+            "file_switch_rate": 0.0,
+            "session_length_sec": 0.0,
+            "time_since_last_commit_sec": 0.0,
+        }
+
+    now_ms = int(time.time() * 1000)
+    first_ts = events[0].get("ts", now_ms)
+    last_ts = events[-1].get("ts", now_ms)
+    session_length_sec = max((last_ts - first_ts) / 1000.0, 1.0)
+
+    edit_events = [e for e in events if e.get("kind") in ("file", "edit")]
+    edits = len(edit_events)
+    session_minutes = max(session_length_sec / 60.0, 1 / 60.0)
+    edit_velocity = edits / session_minutes
+
+    files_seen: set[str] = set()
+    for e in edit_events:
+        p = e.get("payload") or {}
+        if isinstance(p, dict) and "path" in p:
+            files_seen.add(p["path"])
+    file_switch_rate = len(files_seen) / max(edits, 1)
+
+    commit_events = [e for e in events if e.get("kind") == "git"]
+    if commit_events:
+        last_commit_ts = max(e.get("ts", 0) for e in commit_events)
+        time_since_last_commit_sec = (now_ms - last_commit_ts) / 1000.0
+    else:
+        time_since_last_commit_sec = session_length_sec
+
+    terminal_events = [e for e in events if e.get("kind") == "terminal"]
+    test_failures = sum(
+        1 for e in terminal_events
+        if isinstance(e.get("payload"), dict)
+        and e["payload"].get("exit_code", 0) != 0
+    )
+
+    return {
+        "test_failure_count": float(test_failures),
+        "time_in_phase_sec": session_length_sec,
+        "edit_velocity": edit_velocity,
+        "file_switch_rate": file_switch_rate,
+        "session_length_sec": session_length_sec,
+        "time_since_last_commit_sec": time_since_last_commit_sec,
+    }

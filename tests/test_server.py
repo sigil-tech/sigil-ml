@@ -80,10 +80,8 @@ class TestSuggestEndpoint:
         resp = client.post("/predict/suggest", json={})
         assert resp.status_code == 200
         data = resp.json()
-        assert data["action"] in [
-            "stay_silent", "suggest_commit", "suggest_step_back",
-            "suggest_next_task", "suggest_test", "positive_reinforcement",
-        ]
+        from sigil_ml.models.suggest import ACTIONS
+        assert data["action"] in ACTIONS
 
 
 class TestDurationEndpoint:

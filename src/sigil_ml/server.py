@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sqlite3
 import time
 from typing import Any
 
@@ -14,6 +15,9 @@ from sigil_ml.models.stuck import StuckPredictor
 from sigil_ml.models.suggest import SuggestionPolicy
 from sigil_ml.models.duration import DurationEstimator
 from sigil_ml.models.quality import QualityEstimator
+from sigil_ml.schema import ensure_ml_tables
+from sigil_ml.poller import EventPoller
+from sigil_ml.training.scheduler import TrainingScheduler
 
 logger = logging.getLogger("sigil_ml")
 
@@ -25,6 +29,7 @@ _stuck: StuckPredictor | None = None
 _suggest: SuggestionPolicy | None = None
 _duration: DurationEstimator | None = None
 _quality: QualityEstimator | None = None
+_poller: EventPoller | None = None
 _training_in_progress = False
 
 
@@ -36,10 +41,63 @@ def _load_models() -> None:
     _quality = QualityEstimator()
 
 
+def _reload_models_into_poller() -> None:
+    """Reload model instances after retraining."""
+    _load_models()
+    if _poller:
+        _poller.stuck = _stuck
+        _poller.suggest = _suggest
+        _poller.duration = _duration
+        _poller.quality = _quality
+    logger.info("models reloaded into poller")
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
+    global _poller
+    db = config.db_path()
+
+    # Bootstrap Python-owned tables.
+    try:
+        ensure_ml_tables(db)
+    except Exception:
+        logger.warning("schema bootstrap failed (sigild may not have started yet)", exc_info=True)
+
+    # Load models.
     _load_models()
-    logger.info("Models loaded")
+
+    # Start the event poller.
+    _poller = EventPoller(
+        db_path=db,
+        models={
+            "stuck": _stuck,
+            "suggest": _suggest,
+            "duration": _duration,
+            "quality": _quality,
+        },
+    )
+    asyncio.create_task(_poller.run())
+
+    # Start the training scheduler.
+    scheduler = TrainingScheduler(db, reload_callback=_reload_models_into_poller)
+
+    async def _schedule_loop():
+        while True:
+            await asyncio.get_event_loop().run_in_executor(
+                None, scheduler.check_and_retrain
+            )
+            await asyncio.sleep(600)  # check every 10 minutes
+
+    asyncio.create_task(_schedule_loop())
+
+    logger.info("sigil-ml: models loaded, poller started, scheduler active")
+
+
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    if _poller:
+        _poller.stop()
+        logger.info("poller stopped")
 
 
 # ---------- Request / Response schemas ----------
@@ -135,6 +193,35 @@ async def health() -> HealthResponse:
         models=models_status,
         uptime_sec=round(time.time() - _start_time, 1),
     )
+
+
+@app.get("/status")
+async def status() -> dict:
+    """Poller cursor position and latest prediction timestamps."""
+    db = config.db_path()
+    try:
+        conn = sqlite3.connect(str(db), timeout=5.0)
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor_row = conn.execute(
+                "SELECT last_event_id, updated_at FROM ml_cursor WHERE id = 1"
+            ).fetchone()
+            preds = conn.execute(
+                "SELECT model, confidence, created_at FROM ml_predictions "
+                "WHERE expires_at IS NULL OR expires_at > ? "
+                "ORDER BY created_at DESC",
+                (int(time.time() * 1000),),
+            ).fetchall()
+            return {
+                "cursor": dict(cursor_row) if cursor_row else None,
+                "latest_predictions": [dict(r) for r in preds],
+                "poller_running": _poller is not None and _poller._running,
+            }
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        return {"cursor": None, "latest_predictions": [], "poller_running": False}
 
 
 @app.post("/predict/stuck", response_model=StuckResponse)

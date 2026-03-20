@@ -112,10 +112,8 @@ class TestSuggestionPolicy:
         from sigil_ml.models.suggest import SuggestionPolicy
         policy = SuggestionPolicy()
         result = policy.predict({})
-        assert result["action"] in [
-            "stay_silent", "suggest_commit", "suggest_step_back",
-            "suggest_next_task", "suggest_test", "positive_reinforcement",
-        ]
+        from sigil_ml.models.suggest import ACTIONS
+        assert result["action"] in ACTIONS
         assert 0.0 <= result["confidence"] <= 1.0
 
     def test_update_shifts_distribution(self) -> None:
