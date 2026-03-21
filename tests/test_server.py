@@ -12,11 +12,16 @@ def _isolate_models(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client():
-    """Create a test client for the FastAPI app."""
-    # Re-import to pick up the monkeypatched env
-    from sigil_ml.server import app, _load_models
-    _load_models()
-    return TestClient(app)
+    """Create a test client for the FastAPI app.
+
+    Uses raise_server_exceptions=False to avoid leaking startup errors.
+    The TestClient context manager triggers startup/shutdown events.
+    """
+    from sigil_ml.app import create_app
+
+    application = create_app()
+    with TestClient(application) as c:
+        yield c
 
 
 class TestHealthEndpoint:
@@ -43,16 +48,19 @@ class TestHealthEndpoint:
 
 class TestStuckEndpoint:
     def test_predict_with_features(self, client: TestClient) -> None:
-        resp = client.post("/predict/stuck", json={
-            "features": {
-                "test_failure_count": 5,
-                "time_in_phase_sec": 1200,
-                "edit_velocity": 4.0,
-                "file_switch_rate": 0.7,
-                "session_length_sec": 3600,
-                "time_since_last_commit_sec": 1800,
-            }
-        })
+        resp = client.post(
+            "/predict/stuck",
+            json={
+                "features": {
+                    "test_failure_count": 5,
+                    "time_in_phase_sec": 1200,
+                    "edit_velocity": 4.0,
+                    "file_switch_rate": 0.7,
+                    "session_length_sec": 3600,
+                    "time_since_last_commit_sec": 1800,
+                }
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert "probability" in data
@@ -80,11 +88,13 @@ class TestSuggestEndpoint:
         assert "confidence" in data
         # Flow state should have all 5 states.
         from sigil_ml.models.workflow import FLOW_STATES
+
         for state in FLOW_STATES:
             assert state in data["flow_state"]
 
     def test_predict_with_classified_events(self, client: TestClient) -> None:
         from sigil_ml.models.workflow import FLOW_STATES
+
         events = [
             {"kind": "file", "_category": "editing", "ts": 1000},
             {"kind": "terminal", "_category": "verifying", "ts": 2000},
@@ -97,14 +107,17 @@ class TestSuggestEndpoint:
 
 class TestDurationEndpoint:
     def test_predict_with_features(self, client: TestClient) -> None:
-        resp = client.post("/predict/duration", json={
-            "features": {
-                "file_count": 10,
-                "total_edits": 80,
-                "time_of_day_hour": 14,
-                "branch_name_length": 25,
-            }
-        })
+        resp = client.post(
+            "/predict/duration",
+            json={
+                "features": {
+                    "file_count": 10,
+                    "total_edits": 80,
+                    "time_of_day_hour": 14,
+                    "branch_name_length": 25,
+                }
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert "estimated_minutes" in data

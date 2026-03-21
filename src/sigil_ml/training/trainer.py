@@ -1,6 +1,5 @@
 """Trainer: reads from the user's SQLite DB and retrains all models."""
 
-import json
 import logging
 import sqlite3
 import time
@@ -8,12 +7,12 @@ from pathlib import Path
 
 import numpy as np
 
-from sigil_ml.models.stuck import StuckPredictor, FEATURE_NAMES as STUCK_FEATURES
-from sigil_ml.models.duration import DurationEstimator, FEATURE_NAMES as DURATION_FEATURES
-from sigil_ml.features import (
-    extract_stuck_features,
-    extract_duration_features,
-)
+from sigil_ml.features import extract_duration_features, extract_stuck_features
+from sigil_ml.models.duration import FEATURE_NAMES as DURATION_FEATURES
+from sigil_ml.models.duration import DurationEstimator
+from sigil_ml.models.stuck import FEATURE_NAMES as STUCK_FEATURES
+from sigil_ml.models.stuck import StuckPredictor
+from sigil_ml.training.synthetic import generate_duration_data, generate_stuck_data
 
 logger = logging.getLogger(__name__)
 
@@ -64,16 +63,12 @@ class Trainer:
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         try:
-            rows = conn.execute(
-                "SELECT id FROM tasks WHERE completed_at IS NOT NULL"
-            ).fetchall()
+            rows = conn.execute("SELECT id FROM tasks WHERE completed_at IS NOT NULL").fetchall()
         finally:
             conn.close()
 
         if len(rows) < 10:
             logger.info("Not enough completed tasks for stuck training (%d)", len(rows))
-            # Fall back to synthetic data
-            from sigil_ml.training.synthetic import generate_stuck_data
             X, y = generate_stuck_data(500)
             predictor = StuckPredictor()
             predictor.train(X, y)
@@ -87,10 +82,7 @@ class Trainer:
             x = [features.get(f, 0.0) for f in STUCK_FEATURES]
             X_list.append(x)
             # Heuristic label: stuck if high test failures and long time in phase
-            stuck = (
-                features["test_failure_count"] > 3
-                and features["time_in_phase_sec"] > 600
-            )
+            stuck = features["test_failure_count"] > 3 and features["time_in_phase_sec"] > 600
             y_list.append(1.0 if stuck else 0.0)
 
         X = np.array(X_list)
@@ -121,7 +113,6 @@ class Trainer:
 
         if len(rows) < 10:
             logger.info("Not enough completed tasks for duration training (%d)", len(rows))
-            from sigil_ml.training.synthetic import generate_duration_data
             X, y = generate_duration_data(500)
             estimator = DurationEstimator()
             estimator.train(X, y)

@@ -3,6 +3,7 @@
 Polls events → classifies activity → runs models → writes to ml_predictions.
 Runs as an asyncio background task inside the FastAPI process.
 """
+
 import asyncio
 import json
 import logging
@@ -11,19 +12,19 @@ import time
 from pathlib import Path
 
 from sigil_ml.features import (
-    extract_stuck_features,
     extract_duration_features,
     extract_features_from_buffer,
+    extract_stuck_features,
 )
 
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SEC = 0.5
-PREDICT_EVERY_N_EVENTS = 3       # minimum events before predicting
-PREDICT_MIN_INTERVAL_SEC = 60    # minimum seconds between prediction cycles
-QUALITY_WINDOW_SEC = 1800        # 30-minute rolling window for quality features
-PREDICTION_TTL_SEC = 90          # 90-second expiry for stuck/activity/workflow
-QUALITY_TTL_SEC = 120            # 2-minute expiry for quality
+PREDICT_EVERY_N_EVENTS = 3  # minimum events before predicting
+PREDICT_MIN_INTERVAL_SEC = 60  # minimum seconds between prediction cycles
+QUALITY_WINDOW_SEC = 1800  # 30-minute rolling window for quality features
+PREDICTION_TTL_SEC = 90  # 90-second expiry for stuck/activity/workflow
+QUALITY_TTL_SEC = 120  # 2-minute expiry for quality
 
 
 class EventPoller:
@@ -47,9 +48,7 @@ class EventPoller:
         logger.info("poller: started against %s", self.db_path)
         while self._running:
             try:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, self._poll_once
-                )
+                await asyncio.get_event_loop().run_in_executor(None, self._poll_once)
             except sqlite3.OperationalError as e:
                 # Database may not exist yet or be locked — retry silently.
                 logger.debug("poller: sqlite error (will retry): %s", e)
@@ -63,14 +62,11 @@ class EventPoller:
     def _poll_once(self) -> None:
         conn = self._connect()
         try:
-            cursor_id = conn.execute(
-                "SELECT last_event_id FROM ml_cursor WHERE id = 1"
-            ).fetchone()
+            cursor_id = conn.execute("SELECT last_event_id FROM ml_cursor WHERE id = 1").fetchone()
             since = cursor_id[0] if cursor_id else 0
 
             rows = conn.execute(
-                "SELECT id, kind, source, payload, ts FROM events "
-                "WHERE id > ? ORDER BY id ASC LIMIT 100",
+                "SELECT id, kind, source, payload, ts FROM events WHERE id > ? ORDER BY id ASC LIMIT 100",
                 (since,),
             ).fetchall()
 
@@ -117,8 +113,11 @@ class EventPoller:
     _FALLBACK_STUCK = {"probability": 0.5, "confidence": "weak"}
     _FALLBACK_WORKFLOW = {
         "flow_state": {
-            "deep_work": 0.0, "shallow_work": 1.0,
-            "exploring": 0.0, "blocked": 0.0, "winding_down": 0.0,
+            "deep_work": 0.0,
+            "shallow_work": 1.0,
+            "exploring": 0.0,
+            "blocked": 0.0,
+            "winding_down": 0.0,
         },
         "dominant_state": "shallow_work",
         "momentum": 0.0,
@@ -243,15 +242,13 @@ class EventPoller:
         now_ms = int(time.time() * 1000)
         expires_ms = (now_ms + ttl_sec * 1000) if ttl_sec else None
         conn.execute(
-            "INSERT INTO ml_predictions (model, result, confidence, created_at, expires_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO ml_predictions (model, result, confidence, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
             (model, json.dumps(result), round(confidence, 4), now_ms, expires_ms),
         )
 
     def _active_task_id(self, conn: sqlite3.Connection) -> str | None:
         row = conn.execute(
-            "SELECT id FROM tasks WHERE phase != 'idle' AND completed_at IS NULL "
-            "ORDER BY last_active DESC LIMIT 1"
+            "SELECT id FROM tasks WHERE phase != 'idle' AND completed_at IS NULL ORDER BY last_active DESC LIMIT 1"
         ).fetchone()
         return row[0] if row else None
 

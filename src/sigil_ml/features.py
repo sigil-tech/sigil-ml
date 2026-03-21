@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 # --- Activity classification features ---
 
 _EVENT_KINDS = ["file", "process", "hyprland", "git", "terminal", "ai"]
@@ -43,15 +42,19 @@ def extract_activity_features(event: dict) -> dict[str, float]:
 
     # Command type classification for terminal events.
     cmd = str(payload.get("cmd", "")).strip().lower()
-    features["cmd_is_test"] = 1.0 if any(
-        cmd.startswith(p) for p in ("pytest", "go test", "npm test", "cargo test", "jest", "vitest", "mocha")
-    ) else 0.0
-    features["cmd_is_build"] = 1.0 if any(
-        cmd.startswith(p) for p in ("go build", "npm run build", "cargo build", "make", "./gradlew")
-    ) else 0.0
-    features["cmd_is_lint"] = 1.0 if any(
-        cmd.startswith(p) for p in ("flake8", "pylint", "mypy", "ruff", "go vet")
-    ) else 0.0
+    features["cmd_is_test"] = (
+        1.0
+        if any(cmd.startswith(p) for p in ("pytest", "go test", "npm test", "cargo test", "jest", "vitest", "mocha"))
+        else 0.0
+    )
+    features["cmd_is_build"] = (
+        1.0
+        if any(cmd.startswith(p) for p in ("go build", "npm run build", "cargo build", "make", "./gradlew"))
+        else 0.0
+    )
+    features["cmd_is_lint"] = (
+        1.0 if any(cmd.startswith(p) for p in ("flake8", "pylint", "mypy", "ruff", "go vet")) else 0.0
+    )
     features["cmd_is_git"] = 1.0 if cmd.startswith("git ") else 0.0
 
     # File extension category for file events.
@@ -78,9 +81,7 @@ def _query_task(db_path: str | Path, task_id: str) -> dict[str, Any] | None:
         conn.close()
 
 
-def _query_events_for_task(
-    db_path: str | Path, task_id: str, since: int | None = None
-) -> list[dict[str, Any]]:
+def _query_events_for_task(db_path: str | Path, task_id: str, since: int | None = None) -> list[dict[str, Any]]:
     """Read events that fall within a task's time window.
 
     Args:
@@ -275,9 +276,7 @@ def extract_features_from_buffer(events: list[dict]) -> dict[str, float]:
 
     terminal_events = [e for e in events if e.get("kind") == "terminal"]
     test_failures = sum(
-        1 for e in terminal_events
-        if isinstance(e.get("payload"), dict)
-        and e["payload"].get("exit_code", 0) != 0
+        1 for e in terminal_events if isinstance(e.get("payload"), dict) and e["payload"].get("exit_code", 0) != 0
     )
 
     return {
@@ -293,14 +292,19 @@ def extract_features_from_buffer(events: list[dict]) -> dict[str, float]:
 # --- Workflow state features ---
 
 _ACTIVITY_CATEGORIES = [
-    "creating", "refining", "editing", "verifying", "navigating",
-    "researching", "integrating", "communicating", "idle",
+    "creating",
+    "refining",
+    "editing",
+    "verifying",
+    "navigating",
+    "researching",
+    "integrating",
+    "communicating",
+    "idle",
 ]
 
 
-def extract_workflow_features(
-    classified_events: list[dict], session_info: dict
-) -> dict[str, float]:
+def extract_workflow_features(classified_events: list[dict], session_info: dict) -> dict[str, float]:
     """Extract window-level features from classified events for WorkflowStatePredictor.
 
     Args:

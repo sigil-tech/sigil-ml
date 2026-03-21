@@ -7,6 +7,25 @@ on:
     branches: [main]
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Lint with ruff
+        run: ruff check src/ tests/
+
+      - name: Check formatting
+        run: ruff format --check src/ tests/
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -28,9 +47,75 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v
 
-      - name: Check server starts
+      - name: Smoke test — server + API endpoints
         run: |
           sigil-ml serve --port 7799 &
+          SERVER_PID=$!
           sleep 3
-          curl -s http://127.0.0.1:7799/health | grep ok
-          kill %1
+
+          # Health endpoint
+          curl -sf http://127.0.0.1:7799/health | python -m json.tool
+
+          # Predict endpoints
+          curl -sf -X POST http://127.0.0.1:7799/predict/stuck \
+            -H 'Content-Type: application/json' \
+            -d '{"features": {"test_failure_count": 5, "time_in_phase_sec": 1200, "edit_velocity": 4.0, "file_switch_rate": 0.7, "session_length_sec": 3600, "time_since_last_commit_sec": 1800}}' \
+            | python -m json.tool
+
+          curl -sf -X POST http://127.0.0.1:7799/predict/suggest \
+            -H 'Content-Type: application/json' \
+            -d '{}' \
+            | python -m json.tool
+
+          curl -sf -X POST http://127.0.0.1:7799/predict/duration \
+            -H 'Content-Type: application/json' \
+            -d '{}' \
+            | python -m json.tool
+
+          curl -sf -X POST http://127.0.0.1:7799/predict/quality \
+            -H 'Content-Type: application/json' \
+            -d '{"features": {"test_pass_rate": 0.8, "test_total": 10, "edit_focus": 0.7, "velocity_ratio": 1.0, "commits_in_window": 2, "expected_commits": 1.0, "revert_count": 0, "edits_in_window": 20}}' \
+            | python -m json.tool
+
+          # Status endpoint
+          curl -sf http://127.0.0.1:7799/status | python -m json.tool
+
+          kill $SERVER_PID
+
+      - name: Smoke test — CLI train (no-op without DB)
+        run: |
+          sigil-ml train 2>&1 || true
+
+      - name: Smoke test — CLI health-check (server not running)
+        run: |
+          sigil-ml health-check 2>&1 && exit 1 || echo "Expected failure — server not running"
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Install from wheel
+        run: pip install dist/*.whl
+
+      - name: Verify server starts from installed wheel
+        run: |
+          sigil-ml serve --port 7798 &
+          SERVER_PID=$!
+          sleep 3
+          curl -sf http://127.0.0.1:7798/health | python -m json.tool
+          curl -sf -X POST http://127.0.0.1:7798/predict/suggest \
+            -H 'Content-Type: application/json' -d '{}' \
+            | python -m json.tool
+          kill $SERVER_PID

@@ -6,6 +6,7 @@ exclusively manages: the polling cursor.
 Call ensure_ml_tables() on server startup before the poller starts.
 All statements are idempotent (IF NOT EXISTS).
 """
+
 import logging
 import sqlite3
 from pathlib import Path

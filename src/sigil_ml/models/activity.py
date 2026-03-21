@@ -6,8 +6,10 @@ import logging
 
 import joblib
 import numpy as np
+from sklearn.linear_model import SGDClassifier
 
 from sigil_ml import config
+from sigil_ml.features import extract_activity_features
 
 logger = logging.getLogger(__name__)
 
@@ -35,19 +37,38 @@ CATEGORIES_FULL = [
 
 # Terminal commands that indicate verifying activity.
 _VERIFY_PREFIXES = (
-    "go test", "go build", "go vet",
-    "make", "cargo test", "cargo build",
-    "npm test", "npm run test", "npm run build",
-    "pytest", "python -m pytest", "python -m unittest",
-    "./gradlew", "mvn test", "mvn build",
-    "flake8", "pylint", "mypy", "ruff",
-    "jest", "vitest", "mocha",
+    "go test",
+    "go build",
+    "go vet",
+    "make",
+    "cargo test",
+    "cargo build",
+    "npm test",
+    "npm run test",
+    "npm run build",
+    "pytest",
+    "python -m pytest",
+    "python -m unittest",
+    "./gradlew",
+    "mvn test",
+    "mvn build",
+    "flake8",
+    "pylint",
+    "mypy",
+    "ruff",
+    "jest",
+    "vitest",
+    "mocha",
 )
 
 # Terminal commands that indicate integrating activity.
 _INTEGRATE_PREFIXES = (
-    "git commit", "git push", "git merge", "git rebase",
-    "git tag", "gh pr",
+    "git commit",
+    "git push",
+    "git merge",
+    "git rebase",
+    "git tag",
+    "gh pr",
 )
 
 
@@ -163,8 +184,6 @@ class ActivityClassifier:
 
     def _classify_ml(self, event: dict) -> dict:
         """ML-based classification using trained SGDClassifier."""
-        from sigil_ml.features import extract_activity_features
-
         features = extract_activity_features(event)
         feature_names = sorted(features.keys())
         x = np.array([[features[f] for f in feature_names]])
@@ -188,8 +207,6 @@ class ActivityClassifier:
             X: Feature matrix of shape (n_samples, n_features).
             y: Category labels (strings from CATEGORIES or CATEGORIES_FULL).
         """
-        from sklearn.linear_model import SGDClassifier
-
         if self._ml_model is None:
             self._ml_model = SGDClassifier(loss="log_loss", random_state=42)
 

@@ -7,8 +7,10 @@ import math
 
 import joblib
 import numpy as np
+from sklearn.ensemble import GradientBoostingClassifier
 
 from sigil_ml import config
+from sigil_ml.features import extract_workflow_features
 
 logger = logging.getLogger(__name__)
 
@@ -142,8 +144,6 @@ class WorkflowStatePredictor:
 
     def _predict_ml(self, classified_events: list[dict], session_info: dict) -> dict:
         """ML-based state prediction using trained GradientBoostingClassifier."""
-        from sigil_ml.features import extract_workflow_features
-
         features = extract_workflow_features(classified_events, session_info)
         feature_names = sorted(features.keys())
         x = np.array([[features[f] for f in feature_names]])
@@ -239,8 +239,6 @@ class WorkflowStatePredictor:
             X: Feature matrix from extract_workflow_features.
             y: Flow state labels (strings from FLOW_STATES).
         """
-        from sklearn.ensemble import GradientBoostingClassifier
-
         self._ml_model = GradientBoostingClassifier(
             n_estimators=100,
             max_depth=3,

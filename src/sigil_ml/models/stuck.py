@@ -1,7 +1,6 @@
 """Stuck predictor using GradientBoostingClassifier."""
 
 import logging
-from pathlib import Path
 
 import joblib
 import numpy as np

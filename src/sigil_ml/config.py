@@ -24,3 +24,8 @@ def models_dir() -> Path:
 def weights_path(model_name: str) -> Path:
     """Return the path to a specific model's weight file."""
     return models_dir() / f"{model_name}.joblib"
+
+
+def sigild_plugin_url() -> str:
+    """Return the URL for the sigild plugin ingest/capabilities API."""
+    return os.environ.get("SIGILD_PLUGIN_URL", "http://127.0.0.1:7775")
