@@ -31,16 +31,35 @@ jobs:
           files: dist/*
           generate_release_notes: true
 
-  update-homebrew:
+  sync-homebrew:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - name: Update Homebrew formula
-        uses: mislav/bump-homebrew-formula-action@v3
-        with:
-          formula-name: sigil-ml
-          homebrew-tap: sigil-tech/homebrew-sigil
-          tag-name: ${{ github.ref_name }}
-          download-url: https://github.com/sigil-tech/sigil-ml/archive/refs/tags/${{ github.ref_name }}.tar.gz
+      - uses: actions/checkout@v4
+
+      - name: Compute tarball sha256
+        id: sha
+        run: |
+          url="https://github.com/sigil-tech/sigil-ml/archive/refs/tags/${{ github.ref_name }}.tar.gz"
+          sha=$(curl -sL "$url" | shasum -a 256 | cut -d' ' -f1)
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Patch formula with release URL and sha256
+        run: |
+          sed -i \
+            -e 's|url ".*archive/refs/tags/.*"|url "${{ steps.sha.outputs.url }}"|' \
+            -e 's|sha256 "PLACEHOLDER"|sha256 "${{ steps.sha.outputs.sha256 }}"|' \
+            Formula/sigil-ml.rb
+
+      - name: Sync formula to Homebrew tap
+        uses: dmnemec/copy_file_to_another_repo_action@main
         env:
-          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          API_TOKEN_GITHUB: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        with:
+          source_file: Formula/sigil-ml.rb
+          destination_repo: sigil-tech/homebrew-sigil
+          destination_folder: Formula
+          user_email: github-actions[bot]@users.noreply.github.com
+          user_name: github-actions[bot]
+          commit_message: "sigil-ml ${{ github.ref_name }}"
