@@ -350,3 +350,84 @@ def extract_features_from_buffer(events: list[dict]) -> dict[str, float]:
         "session_length_sec": session_length_sec,
         "time_since_last_commit_sec": time_since_last_commit_sec,
     }
+
+
+# --- Workflow state features ---
+
+_ACTIVITY_CATEGORIES = [
+    "creating", "refining", "editing", "verifying", "navigating",
+    "researching", "integrating", "communicating", "idle",
+]
+
+
+def extract_workflow_features(
+    classified_events: list[dict], session_info: dict
+) -> dict[str, float]:
+    """Extract window-level features from classified events for WorkflowStatePredictor.
+
+    Args:
+        classified_events: Events with '_category' key from ActivityClassifier.
+        session_info: Dict with 'session_elapsed_min', 'task_phase', 'test_failures'.
+
+    Returns:
+        Flat dict of floats suitable for sklearn input.
+    """
+    total = len(classified_events)
+    features: dict[str, float] = {}
+
+    # Normalized category counts.
+    counts: dict[str, int] = {}
+    for e in classified_events:
+        cat = e.get("_category", "idle")
+        counts[cat] = counts.get(cat, 0) + 1
+
+    for cat in _ACTIVITY_CATEGORIES:
+        features[f"cat_{cat}"] = counts.get(cat, 0) / max(total, 1)
+
+    # Category entropy (Shannon).
+    entropy = 0.0
+    for cat in _ACTIVITY_CATEGORIES:
+        p = features[f"cat_{cat}"]
+        if p > 0:
+            entropy -= p * math.log2(p)
+    features["category_entropy"] = entropy
+
+    # Event rate (events per minute).
+    if total >= 2:
+        first_ts = classified_events[0].get("ts", 0)
+        last_ts = classified_events[-1].get("ts", 0)
+        span_min = max((last_ts - first_ts) / 60000.0, 1 / 60.0)
+        features["event_rate"] = total / span_min
+    else:
+        features["event_rate"] = 0.0
+
+    # Category transition count.
+    transitions = 0
+    for i in range(1, total):
+        prev_cat = classified_events[i - 1].get("_category", "")
+        curr_cat = classified_events[i].get("_category", "")
+        if prev_cat != curr_cat:
+            transitions += 1
+    features["category_transitions"] = transitions / max(total - 1, 1)
+
+    # Time in dominant category (fraction).
+    if counts:
+        dominant_count = max(counts.values())
+        features["dominant_fraction"] = dominant_count / max(total, 1)
+    else:
+        features["dominant_fraction"] = 1.0
+
+    # Recent bias: category counts weighted 2x for last 25% of events.
+    quarter = max(total // 4, 1)
+    recent_counts: dict[str, int] = {}
+    for e in classified_events[-quarter:]:
+        cat = e.get("_category", "idle")
+        recent_counts[cat] = recent_counts.get(cat, 0) + 1
+    for cat in _ACTIVITY_CATEGORIES:
+        features[f"recent_{cat}"] = recent_counts.get(cat, 0) / max(quarter, 1)
+
+    # Session info features.
+    features["session_elapsed_min"] = session_info.get("session_elapsed_min", 0.0)
+    features["test_failures"] = float(session_info.get("test_failures", 0))
+
+    return features

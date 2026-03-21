@@ -265,6 +265,125 @@ class TestActivityClassifier:
         assert clf2.is_trained is True
 
 
+class TestWorkflowStatePredictor:
+    def _make_events(self, categories: list[str], ts_start: int = 1000000) -> list[dict]:
+        """Helper to create classified events."""
+        return [
+            {"kind": "file", "_category": cat, "ts": ts_start + i * 1000}
+            for i, cat in enumerate(categories)
+        ]
+
+    def test_rules_deep_work(self) -> None:
+        from sigil_ml.models.workflow import WorkflowStatePredictor
+        model = WorkflowStatePredictor()
+        # 90% editing, 10% verifying — high focus, low navigating.
+        events = self._make_events(["editing"] * 9 + ["verifying"])
+        result = model.predict(events, {"session_elapsed_min": 30, "test_failures": 0})
+        assert result["dominant_state"] == "deep_work"
+        assert result["method"] == "rules"
+
+    def test_rules_blocked(self) -> None:
+        from sigil_ml.models.workflow import WorkflowStatePredictor
+        model = WorkflowStatePredictor()
+        events = self._make_events(["verifying"] * 6 + ["editing"] * 4)
+        result = model.predict(events, {"session_elapsed_min": 30, "test_failures": 5})
+        assert result["dominant_state"] == "blocked"
+
+    def test_rules_exploring(self) -> None:
+        from sigil_ml.models.workflow import WorkflowStatePredictor
+        model = WorkflowStatePredictor()
+        events = self._make_events(["navigating"] * 5 + ["researching"] * 4 + ["editing"])
+        result = model.predict(events, {"session_elapsed_min": 15, "test_failures": 0})
+        assert result["dominant_state"] == "exploring"
+
+    def test_rules_default_shallow_work(self) -> None:
+        from sigil_ml.models.workflow import WorkflowStatePredictor
+        model = WorkflowStatePredictor()
+        # Mixed activity without any strong signal — should default to shallow_work.
+        events = self._make_events(["editing"] * 4 + ["navigating"] * 2 + ["verifying"] * 2 + ["researching"] * 2)
+        result = model.predict(events, {"session_elapsed_min": 10, "test_failures": 0})
+        assert result["dominant_state"] == "shallow_work"
+
+    def test_flow_state_sums_to_one(self) -> None:
+        from sigil_ml.models.workflow import WorkflowStatePredictor
+        model = WorkflowStatePredictor()
+        events = self._make_events(["editing"] * 5 + ["verifying"] * 5)
+        result = model.predict(events, {"session_elapsed_min": 20, "test_failures": 1})
+        total = sum(result["flow_state"].values())
+        assert abs(total - 1.0) < 0.01
+
+    def test_momentum_positive_when_accelerating(self) -> None:
+        from sigil_ml.models.workflow import WorkflowStatePredictor
+        model = WorkflowStatePredictor()
+        # Even split — momentum should be near 0 for equal halves.
+        events = self._make_events(["editing"] * 10)
+        result = model.predict(events, {"session_elapsed_min": 10, "test_failures": 0})
+        assert -0.5 <= result["momentum"] <= 0.5
+
+    def test_focus_score_high_for_concentrated(self) -> None:
+        from sigil_ml.models.workflow import WorkflowStatePredictor
+        model = WorkflowStatePredictor()
+        events = self._make_events(["editing"] * 10)
+        result = model.predict(events, {"session_elapsed_min": 10, "test_failures": 0})
+        assert result["focus_score"] == 1.0
+
+    def test_focus_score_lower_for_scattered(self) -> None:
+        from sigil_ml.models.workflow import WorkflowStatePredictor
+        model = WorkflowStatePredictor()
+        events = self._make_events(["editing", "verifying", "navigating", "researching"] * 3)
+        result = model.predict(events, {"session_elapsed_min": 10, "test_failures": 0})
+        assert result["focus_score"] < 0.5
+
+    def test_output_shape(self) -> None:
+        from sigil_ml.models.workflow import WorkflowStatePredictor, FLOW_STATES
+        model = WorkflowStatePredictor()
+        events = self._make_events(["editing"] * 5)
+        result = model.predict(events, {"session_elapsed_min": 5, "test_failures": 0})
+
+        assert "flow_state" in result
+        assert all(s in result["flow_state"] for s in FLOW_STATES)
+        assert "dominant_state" in result
+        assert "momentum" in result
+        assert "focus_score" in result
+        assert "dominant_activity" in result
+        assert "activity_distribution" in result
+        assert "session_elapsed_min" in result
+        assert "method" in result
+        assert "confidence" in result
+
+    def test_untrained_is_trained_false(self) -> None:
+        from sigil_ml.models.workflow import WorkflowStatePredictor
+        model = WorkflowStatePredictor()
+        assert model.is_trained is False
+
+    def test_empty_events(self) -> None:
+        from sigil_ml.models.workflow import WorkflowStatePredictor
+        model = WorkflowStatePredictor()
+        result = model.predict([], {"session_elapsed_min": 0, "test_failures": 0})
+        assert result["dominant_activity"] == "idle"
+        assert result["focus_score"] == 1.0
+
+    def test_weights_persist(self) -> None:
+        from sigil_ml.models.workflow import WorkflowStatePredictor, FLOW_STATES
+        from sigil_ml.features import extract_workflow_features
+
+        rng = np.random.RandomState(42)
+        events = [{"_category": rng.choice(["editing", "verifying"]), "ts": 1000 + i * 1000} for i in range(50)]
+        session_info = {"session_elapsed_min": 10, "test_failures": 0}
+        feats = extract_workflow_features(events, session_info)
+        n_features = len(feats)
+
+        X = rng.rand(100, n_features)
+        y = rng.choice(FLOW_STATES, size=100)
+
+        model1 = WorkflowStatePredictor()
+        model1.train(X, y)
+        assert model1.is_trained
+
+        model2 = WorkflowStatePredictor()
+        assert model2.is_trained
+
+
 class TestDurationEstimator:
     def test_untrained_returns_default(self) -> None:
         from sigil_ml.models.duration import DurationEstimator
