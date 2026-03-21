@@ -146,6 +146,125 @@ class TestSuggestionPolicy:
         assert policy.alphas["suggest_test"] > policy.alphas["stay_silent"]
 
 
+class TestActivityClassifier:
+    def test_file_event_classifies_as_editing(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        result = clf.classify({"kind": "file", "payload": {"path": "/src/main.py", "action": "write"}})
+        assert result["category"] == "editing"
+        assert result["method"] == "rules"
+        assert result["confidence"] > 0
+
+    def test_terminal_test_command_classifies_as_verifying(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        result = clf.classify({"kind": "terminal", "payload": {"cmd": "pytest tests/ -v"}})
+        assert result["category"] == "verifying"
+
+    def test_terminal_build_command_classifies_as_verifying(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        result = clf.classify({"kind": "terminal", "payload": {"cmd": "go test ./..."}})
+        assert result["category"] == "verifying"
+
+    def test_terminal_commit_classifies_as_integrating(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        result = clf.classify({"kind": "terminal", "payload": {"cmd": "git commit -m 'fix'"}})
+        assert result["category"] == "integrating"
+
+    def test_git_event_classifies_as_integrating(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        result = clf.classify({"kind": "git", "payload": {"branch": "main"}})
+        assert result["category"] == "integrating"
+
+    def test_ai_event_classifies_as_researching(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        result = clf.classify({"kind": "ai", "payload": {}})
+        assert result["category"] == "researching"
+
+    def test_hyprland_event_classifies_as_navigating(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        result = clf.classify({"kind": "hyprland", "payload": {"window_class": "firefox"}})
+        assert result["category"] == "navigating"
+
+    def test_process_event_classifies_as_navigating(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        result = clf.classify({"kind": "process", "payload": {"exe": "nvim"}})
+        assert result["category"] == "navigating"
+
+    def test_unknown_event_classifies_as_idle(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        result = clf.classify({"kind": "unknown"})
+        assert result["category"] == "idle"
+
+    def test_plugin_source_classifies_as_communicating(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        result = clf.classify({"kind": "plugin", "source": "github", "payload": {}})
+        assert result["category"] == "communicating"
+
+    def test_classify_batch(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        events = [
+            {"kind": "file", "payload": {"path": "/a.py"}},
+            {"kind": "terminal", "payload": {"cmd": "pytest"}},
+            {"kind": "git", "payload": {}},
+        ]
+        results = clf.classify_batch(events)
+        assert len(results) == 3
+        assert results[0]["category"] == "editing"
+        assert results[1]["category"] == "verifying"
+        assert results[2]["category"] == "integrating"
+
+    def test_untrained_is_trained_false(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        assert clf.is_trained is False
+
+    def test_train_and_classify_ml(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier, CATEGORIES_FULL
+        from sigil_ml.features import extract_activity_features
+        clf = ActivityClassifier()
+
+        # Generate training data with the correct feature shape.
+        sample_event = {"kind": "file", "payload": {"path": "/a.py"}}
+        sample_feats = extract_activity_features(sample_event)
+        feature_names = sorted(sample_feats.keys())
+        n_features = len(feature_names)
+
+        rng = np.random.RandomState(42)
+        n = 200
+        X = rng.rand(n, n_features)
+        y = rng.choice(CATEGORIES_FULL, size=n)
+
+        clf.train(X, y)
+        assert clf.is_trained is True
+
+        # ML classify should return method="ml".
+        result = clf._classify_ml(sample_event)
+        assert result["method"] == "ml"
+        assert result["category"] in CATEGORIES_FULL
+
+    def test_weights_persist(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier, CATEGORIES_FULL
+        rng = np.random.RandomState(42)
+        X = rng.rand(100, 6)
+        y = rng.choice(CATEGORIES_FULL, size=100)
+
+        clf1 = ActivityClassifier()
+        clf1.train(X, y)
+
+        clf2 = ActivityClassifier()
+        assert clf2.is_trained is True
+
+
 class TestDurationEstimator:
     def test_untrained_returns_default(self) -> None:
         from sigil_ml.models.duration import DurationEstimator

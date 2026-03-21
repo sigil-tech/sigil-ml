@@ -1,11 +1,67 @@
 """Feature extraction from SQLite events for ML models."""
 
+from __future__ import annotations
+
 import json
 import math
 import sqlite3
 import time
 from pathlib import Path
 from typing import Any
+
+
+# --- Activity classification features ---
+
+_EVENT_KINDS = ["file", "process", "hyprland", "git", "terminal", "ai"]
+
+
+def extract_activity_features(event: dict) -> dict[str, float]:
+    """Extract features from a single event for ActivityClassifier ML training.
+
+    Returns a flat dict of floats suitable for sklearn input.
+    """
+    kind = event.get("kind", "")
+    payload = event.get("payload") or {}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+
+    features: dict[str, float] = {}
+
+    # One-hot encode event kind.
+    for k in _EVENT_KINDS:
+        features[f"kind_{k}"] = 1.0 if kind == k else 0.0
+
+    # Payload key presence flags.
+    features["has_cmd"] = 1.0 if "cmd" in payload else 0.0
+    features["has_path"] = 1.0 if "path" in payload else 0.0
+    features["has_exit_code"] = 1.0 if "exit_code" in payload else 0.0
+    features["exit_code_nonzero"] = 1.0 if payload.get("exit_code", 0) != 0 else 0.0
+    features["has_branch"] = 1.0 if "branch" in payload else 0.0
+
+    # Command type classification for terminal events.
+    cmd = str(payload.get("cmd", "")).strip().lower()
+    features["cmd_is_test"] = 1.0 if any(
+        cmd.startswith(p) for p in ("pytest", "go test", "npm test", "cargo test", "jest", "vitest", "mocha")
+    ) else 0.0
+    features["cmd_is_build"] = 1.0 if any(
+        cmd.startswith(p) for p in ("go build", "npm run build", "cargo build", "make", "./gradlew")
+    ) else 0.0
+    features["cmd_is_lint"] = 1.0 if any(
+        cmd.startswith(p) for p in ("flake8", "pylint", "mypy", "ruff", "go vet")
+    ) else 0.0
+    features["cmd_is_git"] = 1.0 if cmd.startswith("git ") else 0.0
+
+    # File extension category for file events.
+    path = str(payload.get("path", ""))
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    features["ext_code"] = 1.0 if ext in ("py", "go", "js", "ts", "rs", "java", "c", "cpp", "rb", "swift") else 0.0
+    features["ext_config"] = 1.0 if ext in ("json", "toml", "yaml", "yml", "xml", "ini", "env") else 0.0
+    features["ext_docs"] = 1.0 if ext in ("md", "txt", "rst", "adoc") else 0.0
+
+    return features
 
 
 def _query_task(db_path: str | Path, task_id: str) -> dict[str, Any] | None:
