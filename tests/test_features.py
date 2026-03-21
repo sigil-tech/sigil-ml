@@ -2,17 +2,16 @@
 
 import json
 import sqlite3
-import tempfile
 import time
 from pathlib import Path
 
 import pytest
 
 from sigil_ml.features import (
-    _query_task,
     _query_events_for_task,
-    extract_stuck_features,
+    _query_task,
     extract_duration_features,
+    extract_stuck_features,
 )
 
 
@@ -58,8 +57,8 @@ def test_db(tmp_path: Path) -> Path:
             "coding",
             json.dumps({"main.py": 5, "utils.py": 3}),
             now_ms - 3600_000,  # started 1 hour ago
-            now_ms - 60_000,    # last active 1 min ago
-            None,               # not completed
+            now_ms - 60_000,  # last active 1 min ago
+            None,  # not completed
             2,
             5,
             3,

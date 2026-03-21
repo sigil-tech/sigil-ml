@@ -35,19 +35,38 @@ CATEGORIES_FULL = [
 
 # Terminal commands that indicate verifying activity.
 _VERIFY_PREFIXES = (
-    "go test", "go build", "go vet",
-    "make", "cargo test", "cargo build",
-    "npm test", "npm run test", "npm run build",
-    "pytest", "python -m pytest", "python -m unittest",
-    "./gradlew", "mvn test", "mvn build",
-    "flake8", "pylint", "mypy", "ruff",
-    "jest", "vitest", "mocha",
+    "go test",
+    "go build",
+    "go vet",
+    "make",
+    "cargo test",
+    "cargo build",
+    "npm test",
+    "npm run test",
+    "npm run build",
+    "pytest",
+    "python -m pytest",
+    "python -m unittest",
+    "./gradlew",
+    "mvn test",
+    "mvn build",
+    "flake8",
+    "pylint",
+    "mypy",
+    "ruff",
+    "jest",
+    "vitest",
+    "mocha",
 )
 
 # Terminal commands that indicate integrating activity.
 _INTEGRATE_PREFIXES = (
-    "git commit", "git push", "git merge", "git rebase",
-    "git tag", "gh pr",
+    "git commit",
+    "git push",
+    "git merge",
+    "git rebase",
+    "git tag",
+    "gh pr",
 )
 
 

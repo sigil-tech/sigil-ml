@@ -1,4 +1,5 @@
 """Training scheduler — fires retraining when enough new data has accumulated."""
+
 import logging
 import sqlite3
 import time
@@ -6,8 +7,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-MIN_NEW_TASKS = 10          # retrain after 10 new completed tasks
-MIN_INTERVAL_SEC = 3600     # no more than once per hour
+MIN_NEW_TASKS = 10  # retrain after 10 new completed tasks
+MIN_INTERVAL_SEC = 3600  # no more than once per hour
 
 
 class TrainingScheduler:
@@ -56,9 +57,7 @@ class TrainingScheduler:
             conn = sqlite3.connect(str(self.db_path), timeout=5.0)
             conn.execute("PRAGMA busy_timeout=5000")
             try:
-                row = conn.execute(
-                    "SELECT COUNT(*) FROM tasks WHERE completed_at IS NOT NULL"
-                ).fetchone()
+                row = conn.execute("SELECT COUNT(*) FROM tasks WHERE completed_at IS NOT NULL").fetchone()
                 return row[0] if row else 0
             finally:
                 conn.close()

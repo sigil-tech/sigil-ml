@@ -21,24 +21,28 @@ def generate_stuck_data(n: int = 500) -> tuple[np.ndarray, np.ndarray]:
     n_ok = n - n_stuck
 
     # Stuck samples: high failures, long time in phase, high velocity, high switch rate
-    stuck = np.column_stack([
-        rng.integers(3, 11, size=n_stuck).astype(float),           # test_failure_count
-        rng.uniform(600, 3600, size=n_stuck),                       # time_in_phase_sec
-        rng.uniform(3.0, 8.0, size=n_stuck),                       # edit_velocity
-        rng.uniform(0.5, 1.0, size=n_stuck),                       # file_switch_rate
-        rng.uniform(1800, 7200, size=n_stuck),                      # session_length_sec
-        rng.uniform(1200, 3600, size=n_stuck),                      # time_since_last_commit_sec
-    ])
+    stuck = np.column_stack(
+        [
+            rng.integers(3, 11, size=n_stuck).astype(float),  # test_failure_count
+            rng.uniform(600, 3600, size=n_stuck),  # time_in_phase_sec
+            rng.uniform(3.0, 8.0, size=n_stuck),  # edit_velocity
+            rng.uniform(0.5, 1.0, size=n_stuck),  # file_switch_rate
+            rng.uniform(1800, 7200, size=n_stuck),  # session_length_sec
+            rng.uniform(1200, 3600, size=n_stuck),  # time_since_last_commit_sec
+        ]
+    )
 
     # Not-stuck samples: low failures, shorter times, moderate velocity
-    ok = np.column_stack([
-        rng.integers(0, 3, size=n_ok).astype(float),               # test_failure_count
-        rng.uniform(30, 600, size=n_ok),                            # time_in_phase_sec
-        rng.uniform(0.5, 3.0, size=n_ok),                          # edit_velocity
-        rng.uniform(0.1, 0.5, size=n_ok),                          # file_switch_rate
-        rng.uniform(300, 3600, size=n_ok),                          # session_length_sec
-        rng.uniform(60, 1200, size=n_ok),                           # time_since_last_commit_sec
-    ])
+    ok = np.column_stack(
+        [
+            rng.integers(0, 3, size=n_ok).astype(float),  # test_failure_count
+            rng.uniform(30, 600, size=n_ok),  # time_in_phase_sec
+            rng.uniform(0.5, 3.0, size=n_ok),  # edit_velocity
+            rng.uniform(0.1, 0.5, size=n_ok),  # file_switch_rate
+            rng.uniform(300, 3600, size=n_ok),  # session_length_sec
+            rng.uniform(60, 1200, size=n_ok),  # time_since_last_commit_sec
+        ]
+    )
 
     # Add noise to all features
     stuck += rng.normal(0, 0.1, size=stuck.shape)
@@ -80,12 +84,7 @@ def generate_duration_data(n: int = 500) -> tuple[np.ndarray, np.ndarray]:
     X = np.column_stack([file_count, total_edits, time_of_day_hour, branch_name_length])
 
     # Duration correlated with files and edits, plus noise
-    y = (
-        5.0 * file_count
-        + 0.3 * total_edits
-        + 0.5 * branch_name_length
-        + rng.normal(0, 10, size=n)
-    )
+    y = 5.0 * file_count + 0.3 * total_edits + 0.5 * branch_name_length + rng.normal(0, 10, size=n)
     y = np.clip(y, 10, 180)
 
     return X, y

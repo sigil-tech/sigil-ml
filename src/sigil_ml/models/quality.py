@@ -5,8 +5,8 @@ rule-based initially but the component weights can be learned from
 task outcome data. The LLM interprets scores and generates suggestions.
 """
 
-import logging
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -25,8 +25,8 @@ DEFAULT_WEIGHTS = {
 }
 
 # Quality thresholds.
-THRESHOLD_LOW = 40    # suggest break / switch task
-THRESHOLD_HIGH = 70   # leave engineer alone or positive reinforcement
+THRESHOLD_LOW = 40  # suggest break / switch task
+THRESHOLD_HIGH = 70  # leave engineer alone or positive reinforcement
 
 
 class QualityEstimator:

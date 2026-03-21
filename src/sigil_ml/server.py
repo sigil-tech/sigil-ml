@@ -4,20 +4,19 @@ import asyncio
 import logging
 import sqlite3
 import time
-from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import BackgroundTasks, FastAPI
 from pydantic import BaseModel, Field
 
 from sigil_ml import config
-from sigil_ml.models.stuck import StuckPredictor
 from sigil_ml.models.activity import ActivityClassifier
-from sigil_ml.models.workflow import WorkflowStatePredictor
 from sigil_ml.models.duration import DurationEstimator
 from sigil_ml.models.quality import QualityEstimator
-from sigil_ml.schema import ensure_ml_tables
+from sigil_ml.models.stuck import StuckPredictor
+from sigil_ml.models.workflow import WorkflowStatePredictor
 from sigil_ml.poller import EventPoller
+from sigil_ml.schema import ensure_ml_tables
 from sigil_ml.training.scheduler import TrainingScheduler
 
 logger = logging.getLogger("sigil_ml")
@@ -88,9 +87,7 @@ async def startup_event() -> None:
 
     async def _schedule_loop():
         while True:
-            await asyncio.get_event_loop().run_in_executor(
-                None, scheduler.check_and_retrain
-            )
+            await asyncio.get_event_loop().run_in_executor(None, scheduler.check_and_retrain)
             await asyncio.sleep(600)  # check every 10 minutes
 
     asyncio.create_task(_schedule_loop())
@@ -222,9 +219,7 @@ async def status() -> dict:
         conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
         try:
-            cursor_row = conn.execute(
-                "SELECT last_event_id, updated_at FROM ml_cursor WHERE id = 1"
-            ).fetchone()
+            cursor_row = conn.execute("SELECT last_event_id, updated_at FROM ml_cursor WHERE id = 1").fetchone()
             preds = conn.execute(
                 "SELECT model, confidence, created_at FROM ml_predictions "
                 "WHERE expires_at IS NULL OR expires_at > ? "
@@ -252,6 +247,7 @@ async def predict_stuck(req: StuckRequest) -> StuckResponse:
         features = req.features
     elif req.task_id is not None:
         from sigil_ml.features import extract_stuck_features
+
         features = extract_stuck_features(config.db_path(), req.task_id)
     else:
         return StuckResponse(probability=0.5, confidence="weak")
@@ -297,6 +293,7 @@ async def predict_duration(req: DurationRequest) -> DurationResponse:
         features = req.features
     elif req.task_id is not None:
         from sigil_ml.features import extract_duration_features
+
         features = extract_duration_features(config.db_path(), req.task_id)
     else:
         return DurationResponse(estimated_minutes=60.0, confidence_interval=[30.0, 90.0])
@@ -325,6 +322,7 @@ def _run_training(db_path: str) -> None:
     try:
         _training_in_progress = True
         from sigil_ml.training.trainer import Trainer
+
         trainer = Trainer(db_path)
         result = trainer.train_all()
         logger.info("Training complete: %s", result)
@@ -379,6 +377,7 @@ def main() -> None:
         )
     elif args.command == "train":
         from sigil_ml.training.trainer import Trainer
+
         db = args.db or str(config.db_path())
         print(f"Training models from {db} ...")
         trainer = Trainer(db)
@@ -386,6 +385,7 @@ def main() -> None:
         print(f"Done: {result}")
     elif args.command == "health-check":
         import httpx
+
         try:
             resp = httpx.get("http://127.0.0.1:7774/health", timeout=5)
             data = resp.json()
