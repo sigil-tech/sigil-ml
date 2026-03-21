@@ -1,8 +1,8 @@
 """Work quality estimator — rolling 30-minute quality score.
 
-Computes a 0-100 score from recent workflow signals. Degradation below
-a threshold triggers break/switch suggestions. The score is rule-based
-initially but the component weights can be learned from task outcome data.
+Computes a 0-100 score from recent workflow signals. The score is
+rule-based initially but the component weights can be learned from
+task outcome data. The LLM interprets scores and generates suggestions.
 """
 
 import logging
@@ -76,7 +76,6 @@ class QualityEstimator:
             score: int 0-100
             components: dict of component name → subscore
             status: "degraded" | "normal" | "strong"
-            suggestion: str or None (suggested action if degraded)
         """
         # Component 1: Test pass rate (0-1).
         test_total = features.get("test_total", 0)
@@ -122,16 +121,13 @@ class QualityEstimator:
         score = int(round(score))
         score = max(0, min(100, score))
 
-        # Status and suggestion.
+        # Status.
         if score < THRESHOLD_LOW:
             status = "degraded"
-            suggestion = _suggest_for_degraded(components)
         elif score >= THRESHOLD_HIGH:
             status = "strong"
-            suggestion = None
         else:
             status = "normal"
-            suggestion = None
 
         return {
             "score": score,
@@ -139,7 +135,6 @@ class QualityEstimator:
             "status": status,
             "threshold_low": THRESHOLD_LOW,
             "threshold_high": THRESHOLD_HIGH,
-            "suggestion": suggestion,
         }
 
     def train(self, task_outcomes: list[dict]):
@@ -191,17 +186,3 @@ class QualityEstimator:
 
             self._save_weights()
             logger.info("quality: learned weights %s", self.weights)
-
-
-def _suggest_for_degraded(components: dict) -> str:
-    """Pick the most actionable suggestion based on which component is lowest."""
-    worst = min(components, key=components.get)
-
-    suggestions = {
-        "test_pass_rate": "High test failure rate — consider reviewing error output or taking a different approach.",
-        "edit_focus": "Rapid file switching detected — try focusing on one area at a time.",
-        "velocity_vs_baseline": "Edit velocity has dropped significantly — consider taking a short break.",
-        "commit_frequency": "No recent commits — consider checkpointing your progress.",
-        "no_revert_penalty": "Reverting recent changes frequently — step back and rethink the approach.",
-    }
-    return suggestions.get(worst, "Work quality declining — consider a short break.")

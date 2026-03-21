@@ -141,7 +141,6 @@ class QualityResponse(BaseModel):
     score: int
     components: dict[str, float]
     status: str
-    suggestion: str | None = None
 
 
 class TrainRequest(BaseModel):
@@ -286,7 +285,6 @@ async def predict_quality(req: QualityRequest) -> QualityResponse:
         score=result["score"],
         components=result["components"],
         status=result["status"],
-        suggestion=result.get("suggestion"),
     )
 
 
