@@ -39,8 +39,8 @@ jobs:
         uses: mislav/bump-homebrew-formula-action@v3
         with:
           formula-name: sigil-ml
-          homebrew-tap: alecfeeman/homebrew-sigil
+          homebrew-tap: sigil-tech/homebrew-sigil
           tag-name: ${{ github.ref_name }}
-          download-url: https://github.com/alecfeeman/sigil-ml/archive/refs/tags/${{ github.ref_name }}.tar.gz
+          download-url: https://github.com/sigil-tech/sigil-ml/archive/refs/tags/${{ github.ref_name }}.tar.gz
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
