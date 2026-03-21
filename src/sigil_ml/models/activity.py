@@ -153,13 +153,52 @@ class ActivityClassifier:
         if kind == "process":
             return {"category": "navigating", "confidence": 0.6, "method": "rules"}
 
-        # Plugin-sourced events.
+        # Plugin-sourced events — use source and kind to classify.
         source = event.get("source", "")
-        if source in ("github", "jira", "slack"):
+        event_kind = event.get("kind", "")
+
+        # Known plugin sources with category mappings.
+        if source in ("github", "gitlab", "bitbucket"):
+            if event_kind in ("pr_status", "pr_review", "pr_comment"):
+                return {"category": "communicating", "confidence": 0.8, "method": "rules"}
+            if event_kind in ("ci_status", "check_run"):
+                return {"category": "verifying", "confidence": 0.8, "method": "rules"}
+            return {"category": "integrating", "confidence": 0.7, "method": "rules"}
+
+        if source in ("jira", "linear", "shortcut", "asana"):
             return {"category": "communicating", "confidence": 0.7, "method": "rules"}
+
+        if source in ("slack", "teams", "discord"):
+            return {"category": "communicating", "confidence": 0.8, "method": "rules"}
+
+        if source in ("sentry", "datadog", "pagerduty", "grafana"):
+            return {"category": "researching", "confidence": 0.7, "method": "rules"}
+
+        if source in ("vscode", "jetbrains", "neovim", "cursor"):
+            return {"category": "editing", "confidence": 0.7, "method": "rules"}
+
+        # Try dynamic plugin lookup for unknown sources.
+        if source:
+            category = self._classify_plugin_event(source, event_kind)
+            if category:
+                return {"category": category, "confidence": 0.6, "method": "rules"}
 
         # Unknown → idle.
         return {"category": "idle", "confidence": 0.5, "method": "rules"}
+
+    @staticmethod
+    def _classify_plugin_event(source: str, event_kind: str) -> str | None:
+        """Try to classify a plugin event using capabilities discovery."""
+        try:
+            from sigil_ml.plugins import get_event_kinds_for_plugin
+            data_sources = get_event_kinds_for_plugin(source)
+            if not data_sources:
+                return None
+            # If the plugin reports data sources, it's likely communicating
+            # or integrating — default to communicating for unknown plugins.
+            return "communicating"
+        except Exception:
+            return None
 
     def _classify_ml(self, event: dict) -> dict:
         """ML-based classification using trained SGDClassifier."""

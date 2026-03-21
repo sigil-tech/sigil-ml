@@ -319,6 +319,13 @@ async def predict_quality(req: QualityRequest) -> QualityResponse:
     )
 
 
+@app.get("/plugins")
+async def plugins() -> dict:
+    """Return installed plugin capabilities from sigild."""
+    from sigil_ml.plugins import fetch_capabilities
+    return fetch_capabilities()
+
+
 def _run_training(db_path: str) -> None:
     """Run training in a background thread."""
     global _training_in_progress

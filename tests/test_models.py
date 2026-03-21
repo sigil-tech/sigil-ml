@@ -164,10 +164,29 @@ class TestActivityClassifier:
         result = clf.classify({"kind": "unknown"})
         assert result["category"] == "idle"
 
-    def test_plugin_source_classifies_as_communicating(self) -> None:
+    def test_plugin_source_github_classifies_as_integrating(self) -> None:
         from sigil_ml.models.activity import ActivityClassifier
         clf = ActivityClassifier()
+        # GitHub events without specific kind default to integrating.
         result = clf.classify({"kind": "plugin", "source": "github", "payload": {}})
+        assert result["category"] == "integrating"
+
+    def test_plugin_source_github_pr_classifies_as_communicating(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        result = clf.classify({"kind": "pr_review", "source": "github", "payload": {}})
+        assert result["category"] == "communicating"
+
+    def test_plugin_source_jira_classifies_as_communicating(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        result = clf.classify({"kind": "story_update", "source": "jira", "payload": {}})
+        assert result["category"] == "communicating"
+
+    def test_plugin_source_slack_classifies_as_communicating(self) -> None:
+        from sigil_ml.models.activity import ActivityClassifier
+        clf = ActivityClassifier()
+        result = clf.classify({"kind": "message", "source": "slack", "payload": {}})
         assert result["category"] == "communicating"
 
     def test_classify_batch(self) -> None:
