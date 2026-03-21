@@ -67,11 +67,15 @@ jobs:
       - name: Install build tools
         run: pip install build
 
-      - name: Build package
+      - name: Build sdist and wheel
         run: python -m build
 
-      - name: Verify wheel installs
+      - name: Install from wheel
         run: pip install dist/*.whl
 
-      - name: Verify CLI entry point
-        run: sigil-ml --help || sigil-ml health-check 2>&1 | head -5
+      - name: Verify server starts from installed package
+        run: |
+          sigil-ml serve --port 7798 &
+          sleep 3
+          curl -sf http://127.0.0.1:7798/health | python -m json.tool
+          kill %1
