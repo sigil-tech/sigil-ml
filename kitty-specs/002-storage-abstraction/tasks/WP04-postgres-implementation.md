@@ -1,34 +1,33 @@
 ---
-work_package_id: WP04
-title: Postgres Implementation
-lane: planned
-dependencies: [WP01]
+work_package_id: "WP04"
+title: "Postgres Implementation"
+lane: "planned"
+dependencies: ["WP01"]
 subtasks:
-- T022
-- T023
-- T024
-- T025
-- T026
-- T027
-- T028
-phase: Phase 3 - Cloud Backend
-assignee: ''
-agent: ''
-shell_pid: ''
-review_status: ''
-reviewed_by: ''
+  - "T017"
+  - "T018"
+  - "T019"
+  - "T020"
+  - "T021"
+  - "T022"
+phase: "Phase 3 - Cloud Backend"
+assignee: ""
+agent: ""
+shell_pid: ""
+review_status: ""
+reviewed_by: ""
 history:
-- timestamp: '2026-03-29T16:29:57Z'
-  lane: planned
-  agent: system
-  shell_pid: ''
-  action: Prompt generated via /spec-kitty.tasks
+  - timestamp: "2026-03-30T01:45:06Z"
+    lane: "planned"
+    agent: "system"
+    shell_pid: ""
+    action: "Prompt generated via /spec-kitty.tasks"
 requirement_refs:
-- FR-004
-- FR-008
-- FR-009
-- FR-011
-- FR-012
+  - "FR-004"
+  - "FR-008"
+  - "FR-009"
+  - "FR-011"
+  - "FR-012"
 ---
 
 # Work Package Prompt: WP04 -- Postgres Implementation
@@ -57,377 +56,432 @@ Use language identifiers in code blocks: ````python`, ````bash`
 
 ---
 
-## Implementation Command
-
-This WP depends on WP01 only (the DataStore protocol). It can be implemented in parallel with WP02 and WP03.
-
-```bash
-spec-kitty implement WP04 --base WP01
-```
-
----
-
 ## Objectives & Success Criteria
 
-- Implement `PostgresStore` that satisfies the `DataStore` protocol with a Postgres backend.
-- Support per-tenant schema isolation for multi-tenant cloud deployment.
-- Accept connection configuration via `SIGIL_POSTGRES_URL` environment variable.
-- Respect table ownership rules: Python only writes to `ml_predictions`, `ml_events`, `ml_cursor`.
-- **Success**: `PostgresStore` can be instantiated with a Postgres connection URL, and all DataStore methods work correctly against a Postgres database. Data formats are identical to `SqliteStore` output.
+- Implement `PostgresStore` -- a `DataStore` backend that connects to a Postgres database via a connection URL.
+- Support per-tenant schema isolation (e.g., `tenant_abc.ml_predictions`).
+- Produce identical results to `SqliteStore` for the same input data (FR-011).
+- Respect table ownership rules: Python only writes to `ml_predictions`, `ml_events`, `ml_cursor` (FR-012).
+- Update `create_store()` factory to instantiate `PostgresStore` when operating in cloud mode.
+
+**Success criteria**:
+- FR-004: Postgres implementation of DataStore exists and supports per-tenant data isolation.
+- FR-009: Postgres backend accepts connection URL via `SIGIL_POSTGRES_URL`.
+- SC-004: Switching from SQLite to Postgres requires only a configuration change.
+- SC-005: Both backends produce identical results for the same input data.
+
+**Implementation command**: `spec-kitty implement WP04 --base WP01`
 
 ## Context & Constraints
 
-- **Spec**: `kitty-specs/002-storage-abstraction/spec.md` -- FR-004, FR-008, FR-009, FR-011, FR-012
-- **Prerequisite**: WP01 (DataStore protocol) is complete. `DataStore` protocol exists in `src/sigil_ml/store.py`.
-- **Dependency constraint**: `sigil-ml` limits dependencies to `scikit-learn`, `numpy`, `fastapi`, `uvicorn`, `joblib`. Adding `psycopg2-binary` is acceptable because it is a standard lightweight driver. Do NOT add SQLAlchemy or other ORMs.
-- **Table ownership** (from CLAUDE.md):
-  - Python READS: `events`, `tasks`, `patterns`, `suggestions`
-  - Python WRITES: `ml_predictions`, `ml_events`, `ml_cursor`
-- **Schema mirroring**: The Postgres tables must have the same columns and types as the SQLite schema so that query results are in the same format. The Go daemon owns the main schema creation, but Python must create its owned tables (`ml_cursor`).
-- **Per-tenant isolation**: In cloud mode, each tenant gets a Postgres schema (e.g., `SET search_path TO tenant_abc`). The tenant identifier comes from a configuration parameter.
+- **Prerequisite**: WP01 must be complete (DataStore protocol defined). WP04 can proceed in parallel with WP02/WP03 since it only depends on the protocol, not the refactored callers.
+- **Spec**: `kitty-specs/002-storage-abstraction/spec.md` -- User Story 2 (Cloud Mode Uses Postgres).
+- **CLAUDE.md constraint**: No heavyweight dependencies beyond `scikit-learn`, `numpy`, `fastapi`, `uvicorn`, `joblib`. `psycopg2-binary` is acceptable as an optional dependency.
+- **Table ownership**: Python only writes to `ml_predictions`, `ml_events`, `ml_cursor`. Python only reads from `events`, `tasks`, `patterns`, `suggestions`. Go owns and migrates the main schema.
+
+### Postgres vs SQLite: Key Differences
+
+| Feature | SQLite | Postgres |
+|---------|--------|----------|
+| Auto-increment PK | `INTEGER PRIMARY KEY` | `SERIAL` or `BIGSERIAL` |
+| WAL mode | `PRAGMA journal_mode=WAL` | Not applicable (built-in MVCC) |
+| Busy timeout | `PRAGMA busy_timeout=5000` | Connection pool wait timeout |
+| Schema isolation | Not applicable (single db file) | `SET search_path TO tenant_schema` |
+| JSON handling | Stored as TEXT, parsed by Python | `JSONB` type available (use TEXT for compatibility) |
+| Parameterized queries | `?` placeholders | `%s` placeholders |
+| Boolean | 0/1 integers | Native `BOOLEAN` (but integers work) |
+| Timestamps | Stored as integers (ms since epoch) | Same convention for compatibility |
+
+---
 
 ## Subtasks & Detailed Guidance
 
-### Subtask T022 -- Add psycopg2-binary to project dependencies
+### Subtask T017 -- Add `psycopg2-binary` as optional dependency
 
-- **Purpose**: Add the Postgres driver as a dependency so `PostgresStore` can connect to Postgres.
-- **Steps**:
-  1. Check the project's dependency file. Look for `pyproject.toml` or `setup.py` or `requirements.txt`:
-     ```bash
-     ls -la pyproject.toml setup.py setup.cfg requirements*.txt
-     ```
-  2. Add `psycopg2-binary` as an **optional** dependency (not required for local-only mode):
-     - In `pyproject.toml` (if using extras):
-       ```toml
-       [project.optional-dependencies]
-       postgres = ["psycopg2-binary>=2.9"]
-       ```
-     - Or in `requirements.txt`, add with a comment:
-       ```
-       # Optional: only needed for cloud/Postgres mode
-       psycopg2-binary>=2.9
-       ```
-  3. Do NOT make it a hard dependency. The SQLite backend must work without psycopg2 installed.
-  4. Verify the import will be lazy (only when `PostgresStore` is instantiated, not at module level).
+- **Purpose**: Add the Postgres adapter without making it a required dependency for local-only users.
+- **Files**: `pyproject.toml` (or `setup.cfg` / `setup.py` depending on project structure)
+- **Parallel?**: No -- should be done first so other subtasks can import psycopg2.
 
-- **Files**: `pyproject.toml` or `requirements.txt` (modify)
-- **Parallel?**: No -- do first so the driver is available for T023+.
-- **Notes**: `psycopg2-binary` is preferred over `psycopg2` because it includes pre-built binaries and avoids requiring `libpq-dev` on the build machine.
+**Steps**:
+1. Check the project's dependency management format:
+   ```bash
+   ls pyproject.toml setup.py setup.cfg
+   ```
 
-### Subtask T023 -- Implement PostgresStore connection management and tenant schema isolation
+2. Add `psycopg2-binary` as an optional dependency group:
 
-- **Purpose**: Create the `PostgresStore` class with connection handling, tenant schema support, and the foundation for all data operations.
-- **Steps**:
-  1. Create `src/sigil_ml/store_postgres.py`.
-  2. Import `psycopg2` lazily (inside the class or a try/except at module level):
-     ```python
-     try:
-         import psycopg2
-         import psycopg2.extras
-     except ImportError:
-         psycopg2 = None  # type: ignore
-     ```
-  3. Define the class:
-     ```python
-     class PostgresStore:
-         """DataStore implementation backed by PostgreSQL.
+   **For pyproject.toml (Poetry)**:
+   ```toml
+   [tool.poetry.extras]
+   postgres = ["psycopg2-binary"]
+   ```
 
-         Supports per-tenant schema isolation via Postgres search_path.
-         """
+   **For pyproject.toml (setuptools)**:
+   ```toml
+   [project.optional-dependencies]
+   postgres = ["psycopg2-binary>=2.9"]
+   ```
 
-         def __init__(self, connection_url: str, tenant: str = "default") -> None:
-             if psycopg2 is None:
-                 raise ImportError(
-                     "psycopg2-binary is required for Postgres support. "
-                     "Install with: pip install sigil-ml[postgres]"
-                 )
-             self._connection_url = connection_url
-             self._tenant = tenant
-             self._schema = f"tenant_{tenant}"
-     ```
-  4. Implement `_connect(self)`:
-     ```python
-     def _connect(self):
-         conn = psycopg2.connect(self._connection_url)
-         conn.autocommit = False
-         with conn.cursor() as cur:
-             # Ensure tenant schema exists
-             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {self._schema}")
-             cur.execute(f"SET search_path TO {self._schema}, public")
-             conn.commit()
-         return conn
-     ```
-  5. **Security note**: The schema name is derived from the tenant identifier. Validate that the tenant string contains only alphanumeric characters and underscores to prevent SQL injection:
-     ```python
-     import re
-     if not re.match(r'^[a-zA-Z0-9_]+$', tenant):
-         raise ValueError(f"Invalid tenant identifier: {tenant}")
-     ```
-  6. Consider connection pooling for production use, but a simple connect-per-call approach is acceptable for initial implementation. Add a TODO comment for future pooling.
+3. The dependency is only imported when `PostgresStore` is instantiated (lazy import), so local-only installations don't need it.
 
-- **Files**: `src/sigil_ml/store_postgres.py` (new file, ~60 lines for connection management)
-- **Parallel?**: No -- this must be done first as T024-T026 depend on `_connect`.
-- **Notes**: Postgres does not have `PRAGMA` equivalents. WAL mode is not applicable. The `busy_timeout` equivalent is handled by `psycopg2`'s connection timeout parameter or `statement_timeout`.
+4. Document installation for cloud users:
+   ```bash
+   pip install -e ".[postgres]"
+   ```
 
-### Subtask T024 -- Implement PostgresStore read operations
+---
 
-- **Purpose**: Implement all read-only DataStore methods against Postgres.
-- **Steps**:
-  1. Implement `get_cursor(self) -> int`:
-     ```python
-     def get_cursor(self) -> int:
-         conn = self._connect()
-         try:
-             with conn.cursor() as cur:
-                 cur.execute("SELECT last_event_id FROM ml_cursor WHERE id = 1")
-                 row = cur.fetchone()
-                 return row[0] if row else 0
-         finally:
-             conn.close()
-     ```
+### Subtask T018 -- Implement `PostgresStore` -- connection management and tenant schema
 
-  2. Implement `get_cursor_status(self) -> dict | None` (same pattern, returns dict).
+- **Purpose**: Create the PostgresStore class with connection lifecycle management and per-tenant schema isolation.
+- **Files**: Create new file `src/sigil_ml/store_postgres.py`
+- **Parallel?**: No -- must be done first; T019-T021 depend on connection management.
 
-  3. Implement `get_events_since(self, since_id: int, limit: int = 100) -> list[dict]`:
-     ```python
-     def get_events_since(self, since_id: int, limit: int = 100) -> list[dict]:
-         conn = self._connect()
-         try:
-             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                 cur.execute(
-                     "SELECT id, kind, source, payload, ts FROM events "
-                     "WHERE id > %s ORDER BY id ASC LIMIT %s",
-                     (since_id, limit),
-                 )
-                 rows = cur.fetchall()
-             # Parse JSON payload
-             for row in rows:
-                 if isinstance(row.get("payload"), str):
-                     try:
-                         row["payload"] = json.loads(row["payload"])
-                     except (json.JSONDecodeError, TypeError):
-                         pass
-             return [dict(r) for r in rows]
-         finally:
-             conn.close()
-     ```
+**Steps**:
+1. Create `src/sigil_ml/store_postgres.py`:
 
-     **Important**: Postgres may store `payload` as `jsonb` natively (not a string). Check the column type. If `jsonb`, the driver returns it as a Python dict already -- no parsing needed. Handle both cases.
+```python
+"""DataStore implementation backed by PostgreSQL."""
 
-  4. Implement `get_active_task(self) -> str | None`:
-     ```python
-     def get_active_task(self) -> str | None:
-         conn = self._connect()
-         try:
-             with conn.cursor() as cur:
-                 cur.execute(
-                     "SELECT id FROM tasks WHERE phase != 'idle' AND completed_at IS NULL "
-                     "ORDER BY last_active DESC LIMIT 1"
-                 )
-                 row = cur.fetchone()
-                 return row[0] if row else None
-         finally:
-             conn.close()
-     ```
+from __future__ import annotations
 
-  5. Implement `get_task_by_id`, `get_task_session_info`, `get_events_for_task`, `get_completed_task_ids`, `get_completed_tasks_with_timing`, `count_completed_tasks`, `get_quality_task_stats`, `get_active_predictions` -- all follow the same pattern: connect, query with `%s` placeholders (Postgres style, not `?`), return results, close.
+import json
+import logging
+import time
+from typing import Any
 
-  6. **SQL syntax differences from SQLite**:
-     - Placeholders: `%s` instead of `?`
-     - `SELECT *` with dict cursor returns dicts natively (use `RealDictCursor`)
-     - `INTEGER PRIMARY KEY` does not auto-increment in Postgres; use `SERIAL` or `GENERATED ALWAYS AS IDENTITY`
-     - Boolean values: Postgres uses `TRUE`/`FALSE`, SQLite uses `1`/`0` -- but the DataStore returns Python types so this is handled by the driver
+logger = logging.getLogger(__name__)
 
-- **Files**: `src/sigil_ml/store_postgres.py` (add ~150 lines of read methods)
-- **Parallel?**: Yes -- can proceed once T023 establishes connection management.
-- **Notes**: Use `psycopg2.extras.RealDictCursor` for methods that return dicts. Use a regular cursor for scalar queries.
 
-### Subtask T025 -- Implement PostgresStore write operations
+class PostgresStore:
+    """DataStore implementation backed by a PostgreSQL database.
 
-- **Purpose**: Implement prediction writing, audit event logging, and cursor updates against Postgres.
-- **Steps**:
-  1. Implement `update_cursor(self, last_event_id: int) -> None`:
-     ```python
-     def update_cursor(self, last_event_id: int) -> None:
-         conn = self._connect()
-         try:
-             with conn.cursor() as cur:
-                 cur.execute(
-                     "UPDATE ml_cursor SET last_event_id = %s, updated_at = %s WHERE id = 1",
-                     (last_event_id, int(time.time() * 1000)),
-                 )
-             conn.commit()
-         finally:
-             conn.close()
-     ```
+    Supports per-tenant schema isolation. Each tenant's tables live
+    in a dedicated Postgres schema (e.g., tenant_abc.events).
 
-  2. Implement `insert_prediction(self, model, result, confidence, ttl_sec)`:
-     ```python
-     def insert_prediction(self, model: str, result: dict, confidence: float, ttl_sec: int | None) -> None:
-         now_ms = int(time.time() * 1000)
-         expires_ms = (now_ms + ttl_sec * 1000) if ttl_sec else None
-         conn = self._connect()
-         try:
-             with conn.cursor() as cur:
-                 cur.execute(
-                     "INSERT INTO ml_predictions (model, result, confidence, created_at, expires_at) "
-                     "VALUES (%s, %s, %s, %s, %s)",
-                     (model, json.dumps(result), round(confidence, 4), now_ms, expires_ms),
-                 )
-             conn.commit()
-         finally:
-             conn.close()
-     ```
+    Args:
+        connection_url: Postgres connection URL (e.g., postgresql://user:pass@host:5432/dbname)
+        tenant: Tenant identifier for schema isolation. Defaults to "public".
+    """
 
-  3. Implement `insert_ml_event(self, kind, endpoint, routing, latency_ms)`:
-     ```python
-     def insert_ml_event(self, kind: str, endpoint: str, routing: str, latency_ms: int) -> None:
-         conn = self._connect()
-         try:
-             with conn.cursor() as cur:
-                 cur.execute(
-                     "INSERT INTO ml_events (kind, endpoint, routing, latency_ms, ts) "
-                     "VALUES (%s, %s, %s, %s, %s)",
-                     (kind, endpoint, routing, latency_ms, int(time.time() * 1000)),
-                 )
-             conn.commit()
-         finally:
-             conn.close()
-     ```
+    def __init__(self, connection_url: str, tenant: str = "public") -> None:
+        try:
+            import psycopg2
+        except ImportError:
+            raise ImportError(
+                "psycopg2-binary is required for PostgresStore. "
+                "Install with: pip install sigil-ml[postgres]"
+            ) from None
 
-  4. **Table ownership enforcement**: The `PostgresStore` must only write to `ml_predictions`, `ml_events`, and `ml_cursor`. Verify that no write method targets `events`, `tasks`, `patterns`, or `suggestions` (FR-012).
+        self._connection_url = connection_url
+        self._tenant = tenant
+        self._conn = None
+        self._psycopg2 = psycopg2
+```
 
-- **Files**: `src/sigil_ml/store_postgres.py` (add ~80 lines of write methods)
-- **Parallel?**: Yes -- can proceed once T023 establishes connection management.
-- **Notes**: Postgres requires explicit `conn.commit()` after writes (autocommit is off). The SQLite store also commits explicitly, so the pattern is consistent.
+2. Implement connection management:
+   ```python
+   def _get_conn(self):
+       """Return existing connection or create a new one with tenant schema."""
+       if self._conn is None or self._conn.closed:
+           self._conn = self._psycopg2.connect(self._connection_url)
+           self._conn.autocommit = False
+           with self._conn.cursor() as cur:
+               # Ensure tenant schema exists
+               cur.execute("CREATE SCHEMA IF NOT EXISTS %s", (self._tenant,))
+               # Set search path to tenant schema
+               cur.execute("SET search_path TO %s, public", (self._tenant,))
+           self._conn.commit()
+       return self._conn
 
-### Subtask T026 -- Implement PostgresStore schema bootstrap
+   def commit(self) -> None:
+       if self._conn and not self._conn.closed:
+           self._conn.commit()
 
-- **Purpose**: Create Python-owned tables in the tenant's Postgres schema on first access.
-- **Steps**:
-  1. Implement `ensure_tables(self) -> None`:
-     ```python
-     def ensure_tables(self) -> None:
-         conn = self._connect()
-         try:
-             with conn.cursor() as cur:
-                 cur.execute("""
-                     CREATE TABLE IF NOT EXISTS ml_cursor (
-                         id            INTEGER PRIMARY KEY CHECK (id = 1),
-                         last_event_id BIGINT NOT NULL DEFAULT 0,
-                         updated_at    BIGINT NOT NULL DEFAULT 0
-                     )
-                 """)
-                 cur.execute("""
-                     INSERT INTO ml_cursor (id, last_event_id, updated_at)
-                     VALUES (1, 0, 0)
-                     ON CONFLICT (id) DO NOTHING
-                 """)
-             conn.commit()
-             logger.info("schema: ml_cursor table ensured in schema %s", self._schema)
-         finally:
-             conn.close()
-     ```
+   def close(self) -> None:
+       if self._conn and not self._conn.closed:
+           self._conn.close()
+           self._conn = None
+   ```
 
-  2. **SQL differences from SQLite**:
-     - `INSERT OR IGNORE` (SQLite) becomes `INSERT ... ON CONFLICT (id) DO NOTHING` (Postgres)
-     - `INTEGER NOT NULL DEFAULT 0` works in both
-     - No `PRAGMA` statements needed
+   **Important**: Use `psycopg2.sql` module for safe schema name interpolation (schema names cannot be parameterized with `%s`):
+   ```python
+   from psycopg2 import sql
 
-  3. The tenant schema itself is created in `_connect()` (T023). This method only creates tables within that schema.
+   cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+       sql.Identifier(self._tenant)
+   ))
+   cur.execute(sql.SQL("SET search_path TO {}, public").format(
+       sql.Identifier(self._tenant)
+   ))
+   ```
 
-  4. **Note**: Python does NOT create `ml_predictions` or `ml_events` tables. The Go daemon owns those schemas. Python only creates `ml_cursor` (same as SQLite behavior where only `ml_cursor` is created by `schema.py`).
+**Edge cases**:
+- Tenant schema doesn't exist: `CREATE SCHEMA IF NOT EXISTS` handles this.
+- Database user lacks `CREATE SCHEMA` permission: The `ImportError`-style error message should guide the user.
+- Connection drops: Detect `self._conn.closed` and reconnect.
 
-- **Files**: `src/sigil_ml/store_postgres.py` (add ~30 lines)
-- **Parallel?**: No -- should be done after T023.
-- **Notes**: If the Go daemon hasn't created `ml_predictions` or `ml_events` yet, write operations will fail with a clear Postgres error. This is expected -- Python depends on Go having initialized the main schema.
+---
 
-### Subtask T027 -- Update create_store() factory for Postgres
+### Subtask T019 -- Implement `PostgresStore` -- read operations
 
-- **Purpose**: Extend the factory function to return a `PostgresStore` when the operating mode is cloud.
-- **Steps**:
-  1. Open `src/sigil_ml/store.py`.
-  2. Update `create_store()`:
-     ```python
-     def create_store() -> DataStore:
-         """Create a DataStore based on the current operating mode.
+- **Purpose**: Implement all read methods that query `events`, `tasks`, `ml_cursor`, and `ml_predictions`.
+- **Files**: `src/sigil_ml/store_postgres.py`
+- **Parallel?**: Yes -- can proceed in parallel with T020 after T018 is done.
 
-         Local mode: SqliteStore backed by the sigild database file.
-         Cloud mode: PostgresStore backed by a Postgres connection URL.
-         """
-         from sigil_ml import config
+**Steps**:
+1. Implement `get_cursor()`:
+   ```python
+   def get_cursor(self) -> int:
+       conn = self._get_conn()
+       with conn.cursor() as cur:
+           cur.execute("SELECT last_event_id FROM ml_cursor WHERE id = 1")
+           row = cur.fetchone()
+           return row[0] if row else 0
+   ```
 
-         mode = os.environ.get("SIGIL_MODE", "local")
+2. Implement `get_events_since(since_id, limit=100)`:
+   ```python
+   def get_events_since(self, since_id: int, limit: int = 100) -> list[dict[str, Any]]:
+       conn = self._get_conn()
+       with conn.cursor() as cur:
+           cur.execute(
+               "SELECT id, kind, source, payload, ts FROM events "
+               "WHERE id > %s ORDER BY id ASC LIMIT %s",
+               (since_id, limit),
+           )
+           columns = ["id", "kind", "source", "payload", "ts"]
+           return [dict(zip(columns, row)) for row in cur.fetchall()]
+   ```
 
-         if mode == "cloud":
-             postgres_url = os.environ.get("SIGIL_POSTGRES_URL")
-             if not postgres_url:
-                 raise ValueError("SIGIL_POSTGRES_URL is required in cloud mode")
-             tenant = os.environ.get("SIGIL_TENANT", "default")
-             from sigil_ml.store_postgres import PostgresStore
-             return PostgresStore(postgres_url, tenant=tenant)
-         else:
-             from sigil_ml.store_sqlite import SqliteStore
-             return SqliteStore(config.db_path())
-     ```
-  3. Lazy imports ensure that `psycopg2` is only imported when cloud mode is selected.
+   Note: Use `%s` placeholders (Postgres), not `?` (SQLite).
 
-- **Files**: `src/sigil_ml/store.py` (modify `create_store`)
-- **Parallel?**: No -- depends on T023-T026 being complete.
-- **Notes**: The `SIGIL_MODE` environment variable may be introduced by feature 001 (cloud serving mode). If that feature isn't merged yet, this still works -- the env var defaults to "local".
+3. Implement `get_active_task()`:
+   ```python
+   def get_active_task(self) -> str | None:
+       conn = self._get_conn()
+       with conn.cursor() as cur:
+           cur.execute(
+               "SELECT id FROM tasks WHERE phase != 'idle' "
+               "AND completed_at IS NULL ORDER BY last_active DESC LIMIT 1"
+           )
+           row = cur.fetchone()
+           return row[0] if row else None
+   ```
 
-### Subtask T028 -- Add Postgres connection configuration
+4. Implement `get_task_by_id(task_id)`:
+   ```python
+   def get_task_by_id(self, task_id: str) -> dict[str, Any] | None:
+       conn = self._get_conn()
+       with conn.cursor() as cur:
+           cur.execute("SELECT * FROM tasks WHERE id = %s", (task_id,))
+           if cur.description is None:
+               return None
+           columns = [desc[0] for desc in cur.description]
+           row = cur.fetchone()
+           if row is None:
+               return None
+           return dict(zip(columns, row))
+   ```
 
-- **Purpose**: Add environment variable support for Postgres connection URL and tenant identifier to the config module.
-- **Steps**:
-  1. Open `src/sigil_ml/config.py`.
-  2. Add configuration functions:
-     ```python
-     def operating_mode() -> str:
-         """Return the operating mode: 'local' or 'cloud'."""
-         return os.environ.get("SIGIL_MODE", "local")
+5. Implement `get_events_for_task(task_id, since=None)`:
+   - Same logic as SqliteStore: look up task, determine time window, query events.
+   - Parse JSON payload for each event.
 
-     def postgres_url() -> str | None:
-         """Return the Postgres connection URL, or None if not configured."""
-         return os.environ.get("SIGIL_POSTGRES_URL")
+6. Implement `get_session_info(task_id)`:
+   ```python
+   def get_session_info(self, task_id: str) -> dict[str, Any] | None:
+       conn = self._get_conn()
+       with conn.cursor() as cur:
+           cur.execute("SELECT started_at, phase, test_fails FROM tasks WHERE id = %s", (task_id,))
+           row = cur.fetchone()
+           if row is None:
+               return None
+           return {"started_at": row[0], "phase": row[1], "test_fails": row[2]}
+   ```
 
-     def tenant_id() -> str:
-         """Return the tenant identifier for multi-tenant Postgres deployment."""
-         return os.environ.get("SIGIL_TENANT", "default")
-     ```
-  3. Update `create_store()` in `store.py` to use these config functions instead of reading `os.environ` directly:
-     ```python
-     from sigil_ml import config
-     mode = config.operating_mode()
-     if mode == "cloud":
-         url = config.postgres_url()
-         if not url:
-             raise ValueError("SIGIL_POSTGRES_URL is required in cloud mode")
-         from sigil_ml.store_postgres import PostgresStore
-         return PostgresStore(url, tenant=config.tenant_id())
-     ```
+7. Implement `get_quality_task_stats()`, `get_completed_task_ids()`, `get_completed_tasks_with_timestamps()`, `count_completed_tasks()`, `get_status_data()` -- following the same patterns as SqliteStore but with `%s` placeholders.
 
-- **Files**: `src/sigil_ml/config.py` (add functions), `src/sigil_ml/store.py` (update `create_store`)
-- **Parallel?**: Yes -- the config additions can be done alongside T023-T026.
-- **Notes**: FR-009 requires the Postgres URL be configurable via environment variable. This is the standard pattern for 12-factor apps.
+**Key difference from SQLite**: Postgres `cursor.description` provides column names, so you can build dicts dynamically without `sqlite3.Row`.
+
+---
+
+### Subtask T020 -- Implement `PostgresStore` -- write operations
+
+- **Purpose**: Implement all write methods for `ml_predictions`, `ml_events`, and `ml_cursor`.
+- **Files**: `src/sigil_ml/store_postgres.py`
+- **Parallel?**: Yes -- can proceed in parallel with T019 after T018 is done.
+
+**Steps**:
+1. Implement `update_cursor(event_id)`:
+   ```python
+   def update_cursor(self, event_id: int) -> None:
+       conn = self._get_conn()
+       with conn.cursor() as cur:
+           cur.execute(
+               "UPDATE ml_cursor SET last_event_id = %s, updated_at = %s WHERE id = 1",
+               (event_id, int(time.time() * 1000)),
+           )
+   ```
+
+2. Implement `insert_prediction(model, result, confidence, ttl_sec)`:
+   ```python
+   def insert_prediction(
+       self, model: str, result: dict, confidence: float, ttl_sec: int | None
+   ) -> None:
+       conn = self._get_conn()
+       now_ms = int(time.time() * 1000)
+       expires_ms = (now_ms + ttl_sec * 1000) if ttl_sec else None
+       with conn.cursor() as cur:
+           cur.execute(
+               "INSERT INTO ml_predictions (model, result, confidence, created_at, expires_at) "
+               "VALUES (%s, %s, %s, %s, %s)",
+               (model, json.dumps(result), round(confidence, 4), now_ms, expires_ms),
+           )
+   ```
+
+3. Implement `insert_ml_event(kind, endpoint, routing, latency_ms)`:
+   ```python
+   def insert_ml_event(
+       self, kind: str, endpoint: str, routing: str, latency_ms: int
+   ) -> None:
+       conn = self._get_conn()
+       with conn.cursor() as cur:
+           cur.execute(
+               "INSERT INTO ml_events (kind, endpoint, routing, latency_ms, ts) "
+               "VALUES (%s, %s, %s, %s, %s)",
+               (kind, endpoint, routing, latency_ms, int(time.time() * 1000)),
+           )
+   ```
+
+**Table ownership validation**:
+- [ ] `insert_prediction` writes to `ml_predictions` only (Python-owned).
+- [ ] `insert_ml_event` writes to `ml_events` only (Python-owned).
+- [ ] `update_cursor` writes to `ml_cursor` only (Python-owned).
+- [ ] No write operations target `events`, `tasks`, `patterns`, or `suggestions`.
+
+**Validation**:
+- [ ] Result is JSON-serialized identically to SqliteStore (`json.dumps(result)`).
+- [ ] Confidence is rounded to 4 decimal places.
+- [ ] Timestamps are in milliseconds (same convention as SQLite).
+
+---
+
+### Subtask T021 -- Implement `PostgresStore` -- schema bootstrap
+
+- **Purpose**: Create Python-owned tables in the tenant schema if they don't exist.
+- **Files**: `src/sigil_ml/store_postgres.py`
+- **Parallel?**: No -- should be done after T018 establishes connection management.
+
+**Steps**:
+1. Implement `ensure_tables()`:
+   ```python
+   def ensure_tables(self) -> None:
+       """Create Python-owned tables in tenant schema if they don't exist."""
+       conn = self._get_conn()
+       with conn.cursor() as cur:
+           cur.execute("""
+               CREATE TABLE IF NOT EXISTS ml_cursor (
+                   id            INTEGER PRIMARY KEY CHECK (id = 1),
+                   last_event_id BIGINT NOT NULL DEFAULT 0,
+                   updated_at    BIGINT NOT NULL DEFAULT 0
+               )
+           """)
+           cur.execute("""
+               INSERT INTO ml_cursor (id, last_event_id, updated_at)
+               VALUES (1, 0, 0)
+               ON CONFLICT (id) DO NOTHING
+           """)
+       conn.commit()
+       logger.info("postgres: ml_cursor table ensured in schema %s", self._tenant)
+   ```
+
+**Postgres-specific DDL notes**:
+- Use `BIGINT` instead of `INTEGER` for timestamp fields (Postgres `INTEGER` is 32-bit).
+- Use `ON CONFLICT (id) DO NOTHING` instead of `INSERT OR IGNORE` (SQLite syntax).
+- `INTEGER PRIMARY KEY` in Postgres does NOT auto-increment (unlike SQLite). For ml_cursor, the PK is always 1, so this is fine.
+- The `events`, `tasks`, `patterns`, `suggestions` tables and `ml_predictions`, `ml_events` tables are created by Go. Python only creates `ml_cursor`.
+
+**Edge cases**:
+- Tenant schema doesn't exist yet: Handled in T018's connection setup (`CREATE SCHEMA IF NOT EXISTS`).
+- Tables already exist: `IF NOT EXISTS` is idempotent.
+- `ml_predictions` and `ml_events` must already exist (created by Go). If they don't, the write operations will fail with a clear Postgres error.
+
+---
+
+### Subtask T022 -- Update `create_store()` factory and add Postgres config
+
+- **Purpose**: Wire PostgresStore into the factory function and add the `SIGIL_POSTGRES_URL` environment variable to config.
+- **Files**: `src/sigil_ml/store.py`, `src/sigil_ml/config.py`
+- **Parallel?**: No -- should be done last in this WP, after T018-T021 implement PostgresStore.
+
+**Steps**:
+1. Update `config.py` to add Postgres URL support:
+   ```python
+   def postgres_url() -> str | None:
+       """Return the Postgres connection URL, or None if not configured."""
+       return os.environ.get("SIGIL_POSTGRES_URL")
+
+   def tenant_id() -> str:
+       """Return the tenant identifier for multi-tenant Postgres schemas."""
+       return os.environ.get("SIGIL_TENANT", "public")
+   ```
+
+2. Update `create_store()` in `src/sigil_ml/store.py`:
+
+   **Before** (from WP01):
+   ```python
+   if resolved_mode == "cloud":
+       raise NotImplementedError("Postgres backend not yet implemented")
+   ```
+
+   **After**:
+   ```python
+   if resolved_mode == "cloud":
+       from sigil_ml.store_postgres import PostgresStore
+
+       url = config.postgres_url()
+       if not url:
+           raise ValueError(
+               "SIGIL_POSTGRES_URL environment variable is required in cloud mode"
+           )
+       tenant = config.tenant_id()
+       return PostgresStore(connection_url=url, tenant=tenant)
+   ```
+
+   Note: `PostgresStore` is imported lazily (inside the if block) to avoid requiring `psycopg2` for local-only installations.
+
+3. Verify the factory works for both modes:
+   ```python
+   # Local mode (default):
+   store = create_store()  # Returns SqliteStore
+
+   # Cloud mode:
+   os.environ["SIGIL_MODE"] = "cloud"
+   os.environ["SIGIL_POSTGRES_URL"] = "postgresql://user:pass@localhost:5432/sigil"
+   store = create_store()  # Returns PostgresStore
+   ```
+
+---
 
 ## Risks & Mitigations
 
-- **Risk**: Postgres SQL dialect differences cause subtle bugs (e.g., `LIMIT` behavior, `NULL` handling, timestamp formats). **Mitigation**: The queries are simple CRUD. The prompt specifies Postgres-specific syntax (`%s` placeholders, `ON CONFLICT`, `RealDictCursor`).
-- **Risk**: `psycopg2-binary` not available in all deployment environments. **Mitigation**: Made optional -- only imported when cloud mode is requested. Clear error message if missing.
-- **Risk**: Tenant schema creation fails due to insufficient Postgres permissions. **Mitigation**: The error from `CREATE SCHEMA IF NOT EXISTS` will be clear. Document required permissions: the Postgres user needs `CREATE` on the database.
-- **Risk**: The Go daemon may use different column types in Postgres vs SQLite (e.g., `jsonb` for payload). **Mitigation**: Handle both string and dict payload formats in read methods.
+- **Risk**: Postgres SQL dialect differences (parameterized query placeholders `%s` vs `?`, `INSERT OR IGNORE` vs `ON CONFLICT`). **Mitigation**: Each method is written with Postgres-specific syntax. The subtask guidance above details every difference.
+- **Risk**: Tenant schema creation requires `CREATE SCHEMA` privilege. **Mitigation**: Provide a clear error message if the privilege is missing. Document required Postgres permissions.
+- **Risk**: `psycopg2-binary` adds ~3MB to the installation. **Mitigation**: It's an optional dependency -- local-only users never install it.
+- **Risk**: Connection pooling is not implemented in v1. High-concurrency cloud deployments may exhaust connections. **Mitigation**: Acceptable for initial implementation. Add connection pooling (e.g., `psycopg2.pool.ThreadedConnectionPool`) in a future iteration.
+- **Risk**: Schema name injection via tenant identifier. **Mitigation**: Use `psycopg2.sql.Identifier()` for all schema name interpolation.
 
 ## Review Guidance
 
-- Verify `PostgresStore` implements every method in the `DataStore` protocol.
-- Verify no raw SQL uses `?` placeholders (must be `%s` for Postgres).
-- Verify tenant schema name is validated (alphanumeric + underscore only).
-- Verify `psycopg2` import is lazy (not at module level).
-- Verify table ownership: no writes to `events`, `tasks`, `patterns`, `suggestions`.
-- Verify `create_store()` returns `PostgresStore` when `SIGIL_MODE=cloud`.
-- Test locally: `SIGIL_MODE=local python -c "from sigil_ml.store import create_store; s = create_store()"` should work without psycopg2 installed.
+- Verify every method in `PostgresStore` mirrors the corresponding `SqliteStore` method behavior.
+- Verify all SQL uses `%s` placeholders (Postgres), not `?` (SQLite).
+- Verify `CREATE TABLE` DDL uses Postgres-compatible types (`BIGINT` for timestamps).
+- Verify `INSERT OR IGNORE` is replaced with `ON CONFLICT DO NOTHING`.
+- Verify tenant schema isolation uses `psycopg2.sql.Identifier` (not string formatting).
+- Verify `psycopg2` is imported lazily (only when PostgresStore is instantiated).
+- Verify table ownership: only `ml_cursor` is created by `ensure_tables()`.
 
 ## Activity Log
 
-- 2026-03-29T16:29:57Z -- system -- lane=planned -- Prompt created.
+- 2026-03-30T01:45:06Z -- system -- lane=planned -- Prompt generated via /spec-kitty.tasks

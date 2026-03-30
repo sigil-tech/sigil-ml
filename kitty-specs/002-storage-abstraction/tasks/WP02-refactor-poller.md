@@ -1,30 +1,29 @@
 ---
-work_package_id: WP02
-title: Refactor Poller to Use DataStore
-lane: planned
-dependencies: [WP01]
+work_package_id: "WP02"
+title: "Refactor Poller to Use DataStore"
+lane: "planned"
+dependencies: ["WP01"]
 subtasks:
-- T008
-- T009
-- T010
-- T011
-- T012
-- T013
-phase: Phase 2 - Core Refactor
-assignee: ''
-agent: ''
-shell_pid: ''
-review_status: ''
-reviewed_by: ''
+  - "T006"
+  - "T007"
+  - "T008"
+  - "T009"
+  - "T010"
+phase: "Phase 2 - Core Refactor"
+assignee: ""
+agent: ""
+shell_pid: ""
+review_status: ""
+reviewed_by: ""
 history:
-- timestamp: '2026-03-29T16:29:57Z'
-  lane: planned
-  agent: system
-  shell_pid: ''
-  action: Prompt generated via /spec-kitty.tasks
+  - timestamp: "2026-03-30T01:45:06Z"
+    lane: "planned"
+    agent: "system"
+    shell_pid: ""
+    action: "Prompt generated via /spec-kitty.tasks"
 requirement_refs:
-- FR-005
-- FR-011
+  - "FR-005"
+  - "FR-011"
 ---
 
 # Work Package Prompt: WP02 -- Refactor Poller to Use DataStore
@@ -53,328 +52,416 @@ Use language identifiers in code blocks: ````python`, ````bash`
 
 ---
 
-## Implementation Command
+## Objectives & Success Criteria
 
-This WP depends on WP01. Create the worktree with:
+- Refactor `EventPoller` to accept a `DataStore` instance instead of `db_path: Path`.
+- Eliminate ALL direct `sqlite3` usage from `src/sigil_ml/poller.py`.
+- After this WP, `poller.py` should have zero `import sqlite3` and zero `sqlite3.` references.
+- The poller must call only `DataStore` methods for all data access.
+- All existing poller behavior (poll -> classify -> predict -> write -> commit) remains identical.
 
-```bash
-spec-kitty implement WP02 --base WP01
+**Success criteria**:
+- FR-005: The EventPoller uses the DataStore protocol instead of direct SQLite access.
+- FR-011: The poller is backend-agnostic -- same code works with SQLite or Postgres store.
+
+**Implementation command**: `spec-kitty implement WP02 --base WP01`
+
+## Context & Constraints
+
+- **Prerequisite**: WP01 must be complete (DataStore protocol and SqliteStore exist).
+- **Spec**: `kitty-specs/002-storage-abstraction/spec.md` -- User Story 3 (Poller uses DataStore interface).
+- **Current state**: `poller.py` is 300 lines. It creates connections via `_connect()`, passes `conn` to helper methods, and commits at the end of each poll cycle.
+- **Key pattern to preserve**: The poller currently uses a single connection per poll cycle with a final `conn.commit()`. The DataStore's `commit()` method replaces this.
+
+### Current Architecture (before refactor)
+
+```
+EventPoller.__init__(db_path, models)
+  |
+  v
+_poll_once()
+  conn = _connect()                    # <-- REMOVE
+  cursor = conn.execute(SELECT cursor) # <-- becomes store.get_cursor()
+  rows = conn.execute(SELECT events)   # <-- becomes store.get_events_since()
+  conn.execute(UPDATE cursor)          # <-- becomes store.update_cursor()
+  _predict_and_write(conn)             # <-- conn param removed
+  conn.commit()                        # <-- becomes store.commit()
+  conn.close()                         # <-- REMOVE
+```
+
+### Target Architecture (after refactor)
+
+```
+EventPoller.__init__(store: DataStore, models)
+  |
+  v
+_poll_once()
+  cursor = store.get_cursor()
+  events = store.get_events_since(cursor)
+  store.update_cursor(max_id)
+  _predict_and_write()
+  store.commit()
 ```
 
 ---
 
-## Objectives & Success Criteria
-
-- Refactor `EventPoller` to accept a `DataStore` instance instead of a `db_path`.
-- Eliminate **all** direct `sqlite3` usage from `src/sigil_ml/poller.py`.
-- The poller's behavior must remain functionally identical -- same poll logic, same prediction cadence, same data flow.
-- **Success**: `import sqlite3` does not appear in `poller.py`. The `EventPoller` works with any `DataStore` implementation (including a mock).
-
-## Context & Constraints
-
-- **Spec**: `kitty-specs/002-storage-abstraction/spec.md` -- FR-005, FR-011
-- **Prerequisite**: WP01 must be complete. `DataStore` protocol and `SqliteStore` exist in `src/sigil_ml/store.py` and `src/sigil_ml/store_sqlite.py`.
-- **Current state of `poller.py`**: The `EventPoller` takes `db_path: Path` in its constructor. It creates a `sqlite3.Connection` per poll cycle via `_connect()`. The connection is passed through to `_predict_and_write`, `_session_info`, `_quality_features`, and `_write`. All SQL is inline.
-- **Transaction pattern**: Currently, `_poll_once` opens one connection and commits once at the end (covering cursor update + predictions + audit). The DataStore methods each manage their own connections. This is acceptable because:
-  - The cursor update and predictions are independent writes.
-  - If the process crashes mid-cycle, the cursor won't advance, and the next poll will re-process the same events (idempotent design).
-  - The slight behavior difference (multiple commits vs one) has no user-visible impact.
-
 ## Subtasks & Detailed Guidance
 
-### Subtask T008 -- Change EventPoller constructor to accept DataStore
+### Subtask T006 -- Change `EventPoller.__init__` to accept `DataStore`; remove `_connect`
 
-- **Purpose**: Replace the `db_path` parameter with a `DataStore` dependency, establishing the new interface.
-- **Steps**:
-  1. Open `src/sigil_ml/poller.py`.
-  2. Add import: `from sigil_ml.store import DataStore`
-  3. Change the constructor:
+- **Purpose**: Replace the `db_path` dependency with a `DataStore` dependency. Remove the `_connect()` method that creates raw SQLite connections.
+- **Files**: `src/sigil_ml/poller.py`
+- **Parallel?**: No -- must be done first; T007-T009 depend on this.
 
-     **Before**:
-     ```python
-     def __init__(self, db_path: Path, models: dict) -> None:
-         self.db_path = db_path
-         ...
-     ```
+**Steps**:
+1. Change the constructor signature:
 
-     **After**:
-     ```python
-     def __init__(self, store: DataStore, models: dict) -> None:
-         self.store = store
-         ...
-     ```
+   **Before** (line 33):
+   ```python
+   def __init__(self, db_path: Path, models: dict) -> None:
+       self.db_path = db_path
+   ```
 
-  4. Remove the `db_path` attribute. The `self.db_path` reference in the `run()` log message should use a string representation of the store (or be updated to log "poller: started").
-  5. **Important**: The poller currently passes `self.db_path` to `extract_stuck_features` and `extract_duration_features` in `_predict_and_write`. For now, these feature extraction functions still take `db_path`. This will be fixed in WP03. As a temporary bridge, the `SqliteStore` should expose a `db_path` property, OR the poller should get `db_path` from config. Prefer the latter to keep the store interface clean.
+   **After**:
+   ```python
+   def __init__(self, store: DataStore, models: dict) -> None:
+       self.store = store
+   ```
 
-- **Files**: `src/sigil_ml/poller.py` (modify constructor and class-level attribute)
-- **Parallel?**: No -- this is the first change; all other subtasks depend on it.
-- **Notes**: Do not change the `models` parameter. Only the data access path changes.
+2. Add the import at the top of the file:
+   ```python
+   from sigil_ml.store import DataStore
+   ```
 
-### Subtask T009 -- Refactor `_poll_once` for DataStore
+3. Remove the `_connect` method (lines 295-298):
+   ```python
+   # DELETE THIS ENTIRE METHOD:
+   def _connect(self) -> sqlite3.Connection:
+       conn = sqlite3.connect(str(self.db_path), timeout=5.0)
+       conn.execute("PRAGMA journal_mode=WAL")
+       conn.execute("PRAGMA busy_timeout=5000")
+       return conn
+   ```
 
-- **Purpose**: Replace the inline SQLite cursor read, event query, and cursor update with DataStore method calls.
-- **Steps**:
-  1. Replace the cursor read:
+4. Remove `from pathlib import Path` import if no longer used.
 
-     **Before**:
-     ```python
-     cursor_id = conn.execute("SELECT last_event_id FROM ml_cursor WHERE id = 1").fetchone()
-     since = cursor_id[0] if cursor_id else 0
-     ```
+**Notes**:
+- The `db_path` attribute is referenced in the `run()` method's log message (line 48). Change it to log the store type instead:
+  ```python
+  logger.info("poller: started with %s", type(self.store).__name__)
+  ```
 
-     **After**:
-     ```python
-     since = self.store.get_cursor()
-     ```
+---
 
-  2. Replace the event query:
+### Subtask T007 -- Refactor `_poll_once` to use DataStore methods
 
-     **Before**:
-     ```python
-     rows = conn.execute(
-         "SELECT id, kind, source, payload, ts FROM events WHERE id > ? ORDER BY id ASC LIMIT 100",
-         (since,),
-     ).fetchall()
-     ```
+- **Purpose**: Replace the inline SQL in `_poll_once()` with DataStore method calls.
+- **Files**: `src/sigil_ml/poller.py`
+- **Parallel?**: Yes -- can proceed in parallel with T008, T009 after T006 is done.
 
-     **After**:
-     ```python
-     rows = self.store.get_events_since(since, limit=100)
-     ```
+**Steps**:
+1. Replace the cursor read (line 65):
 
-     Note: The returned rows are already dicts with parsed payload (DataStore handles this).
+   **Before**:
+   ```python
+   cursor_id = conn.execute("SELECT last_event_id FROM ml_cursor WHERE id = 1").fetchone()
+   since = cursor_id[0] if cursor_id else 0
+   ```
 
-  3. Update the event processing loop. Currently it converts tuples to dicts via `dict(zip(...))`. With DataStore, rows are already dicts, so simplify:
+   **After**:
+   ```python
+   since = self.store.get_cursor()
+   ```
 
-     ```python
-     if not rows:
-         return
+2. Replace the events query (lines 68-71):
 
-     events = []
-     for e in rows:
-         # Payload already parsed by DataStore
-         classification = self.activity.classify(e)
-         e["_category"] = classification["category"]
-         e["_category_confidence"] = classification["confidence"]
-         events.append(e)
-     ```
+   **Before**:
+   ```python
+   rows = conn.execute(
+       "SELECT id, kind, source, payload, ts FROM events WHERE id > ? ORDER BY id ASC LIMIT 100",
+       (since,),
+   ).fetchall()
+   ```
 
-  4. Replace the cursor update:
+   **After**:
+   ```python
+   rows = self.store.get_events_since(since, limit=100)
+   ```
 
-     **Before**:
-     ```python
-     conn.execute(
-         "UPDATE ml_cursor SET last_event_id = ?, updated_at = ? WHERE id = 1",
-         (max_id, int(time.time() * 1000)),
-     )
-     ```
+3. Adjust the event processing loop. Currently (lines 76-89) it processes `rows` as tuples via `dict(zip(...))`. After refactoring, `get_events_since` returns list of dicts already, so:
 
-     **After**:
-     ```python
-     self.store.update_cursor(max_id)
-     ```
+   **Before**:
+   ```python
+   events = []
+   for row in rows:
+       e = dict(zip(["id", "kind", "source", "payload", "ts"], row))
+       if isinstance(e.get("payload"), str):
+           ...
+   ```
 
-  5. Remove the `conn` variable from `_poll_once` entirely. The method should no longer open or close any connection.
+   **After**:
+   ```python
+   events = []
+   for e in rows:
+       if isinstance(e.get("payload"), str):
+           try:
+               e["payload"] = json.loads(e["payload"])
+           except (json.JSONDecodeError, TypeError):
+               pass
+       classification = self.activity.classify(e)
+       e["_category"] = classification["category"]
+       e["_category_confidence"] = classification["confidence"]
+       events.append(e)
+   ```
 
-  6. Update `_predict_and_write` call -- it currently receives `conn`. Change to pass no connection:
-     ```python
-     self._predict_and_write()
-     ```
+4. Replace the cursor update (lines 97-99):
 
-  7. Remove the `conn.commit()` at the end of `_poll_once` (DataStore methods commit internally).
+   **Before**:
+   ```python
+   conn.execute(
+       "UPDATE ml_cursor SET last_event_id = ?, updated_at = ? WHERE id = 1",
+       (max_id, int(time.time() * 1000)),
+   )
+   ```
 
-- **Files**: `src/sigil_ml/poller.py` (modify `_poll_once`)
-- **Parallel?**: Yes -- can proceed once T008 is done.
-- **Notes**: The `_poll_once` method currently catches `sqlite3.OperationalError` in the `run()` loop. After refactoring, the DataStore may raise different exceptions. Update the error handling in `run()` to catch `Exception` more broadly or the specific exceptions the DataStore raises.
+   **After**:
+   ```python
+   self.store.update_cursor(max_id)
+   ```
 
-### Subtask T010 -- Refactor `_predict_and_write` for DataStore
+5. Replace `conn.commit()` (line 108) with `self.store.commit()`.
 
-- **Purpose**: Replace inline SQL for getting active task, writing predictions, and writing audit events.
-- **Steps**:
-  1. Change the method signature -- remove the `conn` parameter:
+6. Remove `conn = self._connect()` (line 63) and the `try/finally conn.close()` wrapper (lines 64, 109-110). The DataStore manages its own connection lifecycle.
 
-     **Before**: `def _predict_and_write(self, conn: sqlite3.Connection) -> None:`
-     **After**: `def _predict_and_write(self) -> None:`
+7. The full `_poll_once()` method structure becomes:
+   ```python
+   def _poll_once(self) -> None:
+       since = self.store.get_cursor()
+       rows = self.store.get_events_since(since, limit=100)
+       if not rows:
+           return
 
-  2. Replace active task lookup:
+       events = []
+       for e in rows:
+           # ... classify events (unchanged) ...
+           events.append(e)
 
-     **Before**:
-     ```python
-     task_id = self._active_task_id(conn)
-     ```
+       self._buffer.extend(events)
+       self._buffer = self._buffer[-200:]
+       self._since_last_predict += len(events)
 
-     **After**:
-     ```python
-     task_id = self.store.get_active_task()
-     ```
+       max_id = max(e["id"] for e in events)
+       self.store.update_cursor(max_id)
 
-  3. Replace prediction writes (the `_write` helper):
+       elapsed = time.time() - self._last_predict_time
+       if self._since_last_predict >= PREDICT_EVERY_N_EVENTS and elapsed >= PREDICT_MIN_INTERVAL_SEC:
+           self._predict_and_write()
+           self._since_last_predict = 0
+           self._last_predict_time = time.time()
 
-     **Before**:
-     ```python
-     self._write(conn, "stuck", result, ...)
-     ```
+       self.store.commit()
+   ```
 
-     **After**:
-     ```python
-     self.store.insert_prediction("stuck", result, confidence, ttl_sec)
-     ```
+---
 
-     Replace all 5 calls to `self._write(conn, ...)` with `self.store.insert_prediction(...)`.
+### Subtask T008 -- Refactor `_predict_and_write` to use DataStore methods
 
-  4. Replace the audit event write at the end:
+- **Purpose**: Remove the `conn` parameter from `_predict_and_write` and replace all SQL operations with DataStore calls.
+- **Files**: `src/sigil_ml/poller.py`
+- **Parallel?**: Yes -- can proceed in parallel with T007, T009.
 
-     **Before**:
-     ```python
-     conn.execute(
-         "INSERT INTO ml_events (kind, endpoint, routing, latency_ms, ts) VALUES (...)",
-         (latency_ms, int(time.time() * 1000)),
-     )
-     ```
+**Steps**:
+1. Change the method signature:
 
-     **After**:
-     ```python
-     self.store.insert_ml_event("prediction", "poller", "local", latency_ms)
-     ```
+   **Before** (line 133):
+   ```python
+   def _predict_and_write(self, conn: sqlite3.Connection) -> None:
+   ```
 
-  5. For stuck prediction, the poller calls `extract_stuck_features(self.db_path, task_id)`. Until WP03 changes the signature, use `config.db_path()` as a temporary bridge:
-     ```python
-     from sigil_ml import config
-     # Temporary until WP03 updates feature extraction signatures
-     feats = extract_stuck_features(config.db_path(), task_id)
-     ```
+   **After**:
+   ```python
+   def _predict_and_write(self) -> None:
+   ```
 
-  6. Same for `extract_duration_features(self.db_path, task_id)` -- use `config.db_path()` temporarily.
+2. Replace `self._active_task_id(conn)` (line 135) with `self.store.get_active_task()`.
 
-- **Files**: `src/sigil_ml/poller.py` (modify `_predict_and_write`)
-- **Parallel?**: Yes -- can proceed once T008 is done.
-- **Notes**: The 5 prediction writes are: stuck, activity, suggest (workflow), duration, quality.
+3. Replace `extract_stuck_features(self.db_path, task_id)` (line 140) with `extract_stuck_features(self.store, task_id)`.
+   - **Important**: This signature change happens in WP03. For now, the poller must pass `self.store` instead of `self.db_path`. If WP03 is not yet complete, use `self.store.db_path` as a temporary bridge. Prefer passing the store directly.
 
-### Subtask T011 -- Refactor `_session_info` and `_quality_features` for DataStore
+4. Replace `self._write(conn, ...)` calls (lines 146, 150, 155, 170, 175) with `self._write(...)` (no conn param).
 
-- **Purpose**: Replace the remaining inline SQL in helper methods.
-- **Steps**:
-  1. Refactor `_session_info`:
+5. Replace `extract_duration_features(self.db_path, task_id)` (line 160) with `extract_duration_features(self.store, task_id)` (same WP03 note as step 3).
 
-     **Before**: Takes `conn: sqlite3.Connection` and `task_id`:
-     ```python
-     def _session_info(self, conn: sqlite3.Connection, task_id: str | None) -> dict:
-         ...
-         row = conn.execute("SELECT started_at, phase, test_fails FROM tasks WHERE id = ?", (task_id,)).fetchone()
-     ```
+6. Replace the session info call. Currently `self._session_info(conn, task_id)` (line 153). After refactor: `self._session_info(task_id)`.
 
-     **After**: Remove `conn` parameter, use DataStore:
-     ```python
-     def _session_info(self, task_id: str | None) -> dict:
-         session_elapsed_min = 0.0
-         task_phase = None
-         test_failures = 0
+7. Replace the quality features call. Currently `self._quality_features(conn)` (line 172). After refactor: `self._quality_features()`.
 
-         if task_id:
-             info = self.store.get_task_session_info(task_id)
-             if info:
-                 started_at = info.get("started_at", 0) or 0
-                 session_elapsed_min = (time.time() * 1000 - started_at) / 60000.0
-                 task_phase = info.get("phase")
-                 test_failures = info.get("test_fails", 0) or 0
+8. Replace the inline audit log write (lines 179-183):
 
-         return {
-             "session_elapsed_min": max(session_elapsed_min, 0.0),
-             "task_phase": task_phase,
-             "test_failures": test_failures,
-         }
-     ```
+   **Before**:
+   ```python
+   conn.execute(
+       "INSERT INTO ml_events (kind, endpoint, routing, latency_ms, ts) "
+       "VALUES ('prediction', 'poller', 'local', ?, ?)",
+       (latency_ms, int(time.time() * 1000)),
+   )
+   ```
 
-  2. Refactor `_quality_features`:
+   **After**:
+   ```python
+   self.store.insert_ml_event("prediction", "poller", "local", latency_ms)
+   ```
 
-     **Before**: Takes `conn: sqlite3.Connection`:
-     ```python
-     def _quality_features(self, conn: sqlite3.Connection) -> dict:
-         ...
-         row = conn.execute("SELECT test_runs, test_fails, commit_count FROM tasks ...").fetchone()
-     ```
+9. Remove the `_active_task_id` method (lines 249-252) -- it's replaced by `self.store.get_active_task()`.
 
-     **After**: Remove `conn` parameter, use DataStore:
-     ```python
-     def _quality_features(self) -> dict:
-         ...
-         stats = self.store.get_quality_task_stats()
-         if stats and stats.get("test_runs"):
-             test_pass_rate = 1.0 - (stats["test_fails"] / max(stats["test_runs"], 1))
-             baseline_commits = max(stats["commit_count"], 1)
-         else:
-             test_pass_rate = 0.7
-             baseline_commits = 1
-         ...
-     ```
+10. Refactor the `_write` method (lines 234-247):
 
-  3. Update all callers in `_predict_and_write` to call these without `conn`.
+    **Before**:
+    ```python
+    def _write(self, conn: sqlite3.Connection, model: str, result: dict,
+               confidence: float, ttl_sec: int | None) -> None:
+        ...
+        conn.execute("INSERT INTO ml_predictions ...")
+    ```
 
-- **Files**: `src/sigil_ml/poller.py` (modify `_session_info`, `_quality_features`)
-- **Parallel?**: Yes -- can proceed once T008 is done.
-- **Notes**: The `_quality_features` method also uses `self._buffer` for event window analysis. This part stays unchanged -- only the SQL query is replaced.
+    **After**:
+    ```python
+    def _write(self, model: str, result: dict, confidence: float,
+               ttl_sec: int | None) -> None:
+        self.store.insert_prediction(model, result, confidence, ttl_sec)
+    ```
 
-### Subtask T012 -- Remove `_connect`, `_write`, `_active_task_id`, and sqlite3 import
+    Or simply inline the `store.insert_prediction()` call at each call site and remove `_write` entirely.
 
-- **Purpose**: Clean up the poller module by removing all SQLite-specific code that has been replaced by DataStore calls.
-- **Steps**:
-  1. Delete the `_connect(self) -> sqlite3.Connection` method entirely.
-  2. Delete the `_write(self, conn, model, result, confidence, ttl_sec)` helper method (replaced by `store.insert_prediction`).
-  3. Delete the `_active_task_id(self, conn)` method (replaced by `store.get_active_task()`).
-  4. Remove `import sqlite3` from the top of the file.
-  5. Remove `from pathlib import Path` if no longer used.
-  6. Verify the module still imports correctly: `python -c "from sigil_ml.poller import EventPoller"`
+---
 
-- **Files**: `src/sigil_ml/poller.py` (remove methods and imports)
-- **Parallel?**: No -- do this after T009-T011 are complete to avoid breaking intermediate states.
-- **Notes**: After this subtask, `poller.py` should have zero references to `sqlite3`.
+### Subtask T009 -- Refactor `_session_info` and `_quality_features` to use DataStore
 
-### Subtask T013 -- Update app.py startup to pass DataStore to EventPoller
+- **Purpose**: Replace the remaining SQL operations in the poller's helper methods.
+- **Files**: `src/sigil_ml/poller.py`
+- **Parallel?**: Yes -- can proceed in parallel with T007, T008.
 
-- **Purpose**: Wire the new `DataStore` into the application startup sequence so the poller receives a store instance.
-- **Steps**:
-  1. Open `src/sigil_ml/app.py`.
-  2. In `startup_event()`, create a store before creating the poller:
+**Steps**:
+1. Refactor `_session_info` (lines 211-232):
 
-     **Before**:
-     ```python
-     db = config.db_path()
-     ensure_ml_tables(db)
-     ...
-     state.poller = EventPoller(db_path=db, models={...})
-     ```
+   **Before**:
+   ```python
+   def _session_info(self, conn: sqlite3.Connection, task_id: str | None) -> dict:
+       ...
+       if task_id:
+           row = conn.execute(
+               "SELECT started_at, phase, test_fails FROM tasks WHERE id = ?",
+               (task_id,),
+           ).fetchone()
+   ```
 
-     **After**:
-     ```python
-     from sigil_ml.store import create_store
-     store = create_store()
-     store.ensure_tables()
-     ...
-     state.poller = EventPoller(store=store, models={...})
-     ```
+   **After**:
+   ```python
+   def _session_info(self, task_id: str | None) -> dict:
+       session_elapsed_min = 0.0
+       task_phase = None
+       test_failures = 0
 
-  3. The `TrainingScheduler` still takes `db_path` in this WP (it will be refactored in WP03). Keep: `scheduler = TrainingScheduler(db, reload_callback=...)`.
-  4. Store the `store` instance on `state` for later use by routes (WP03): `state.store = store`.
-  5. Update `AppState` to include `store: DataStore | None = None`.
+       if task_id:
+           info = self.store.get_session_info(task_id)
+           if info:
+               started_at = info["started_at"] or 0
+               session_elapsed_min = (time.time() * 1000 - started_at) / 60000.0
+               task_phase = info["phase"]
+               test_failures = info["test_fails"] or 0
 
-- **Files**: `src/sigil_ml/app.py` (modify `startup_event`, `AppState`)
-- **Parallel?**: No -- depends on T008-T012 being complete.
-- **Notes**: The `ensure_ml_tables` import from `schema` can remain for now (removed in WP05). The key change is that the poller gets a `DataStore` instead of `db_path`.
+       return {
+           "session_elapsed_min": max(session_elapsed_min, 0.0),
+           "task_phase": task_phase,
+           "test_failures": test_failures,
+       }
+   ```
+
+2. Refactor `_quality_features` (lines 255-293):
+
+   **Before**:
+   ```python
+   def _quality_features(self, conn: sqlite3.Connection) -> dict:
+       ...
+       row = conn.execute(
+           "SELECT test_runs, test_fails, commit_count FROM tasks "
+           "WHERE completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT 1"
+       ).fetchone()
+   ```
+
+   **After**:
+   ```python
+   def _quality_features(self) -> dict:
+       now_ms = int(time.time() * 1000)
+       window_start = now_ms - QUALITY_WINDOW_SEC * 1000
+       window = [e for e in self._buffer if e.get("ts", 0) >= window_start]
+
+       # ... edit_events, files, edit_focus logic unchanged ...
+
+       stats = self.store.get_quality_task_stats()
+
+       if stats and stats["test_runs"]:
+           test_pass_rate = 1.0 - (stats["test_fails"] / max(stats["test_runs"], 1))
+           baseline_commits = max(stats["commit_count"], 1)
+       else:
+           test_pass_rate = 0.7
+           baseline_commits = 1
+
+       # ... rest of return dict unchanged ...
+   ```
+
+   Note: The buffer processing logic (edit events, files, commit events, terminal events) is pure in-memory work and does NOT touch the database. Only the `conn.execute(SELECT ... FROM tasks ...)` call needs to be replaced.
+
+---
+
+### Subtask T010 -- Remove all `sqlite3` imports from `poller.py`
+
+- **Purpose**: Final cleanup -- verify and remove all `sqlite3` references.
+- **Files**: `src/sigil_ml/poller.py`
+- **Parallel?**: No -- must be done after T006-T009 are complete.
+
+**Steps**:
+1. Remove `import sqlite3` (line 10).
+
+2. Update the error handling in `run()` (line 52):
+
+   **Before**:
+   ```python
+   except sqlite3.OperationalError as e:
+       logger.debug("poller: sqlite error (will retry): %s", e)
+   ```
+
+   **After**:
+   ```python
+   except Exception as e:
+       logger.debug("poller: store error (will retry): %s", e)
+   ```
+
+   Alternatively, if a `StoreError` base exception is defined in the DataStore module, catch that specifically. For now, catching `Exception` and logging at debug level is safe (matches the current "retry silently" pattern).
+
+3. Remove `from pathlib import Path` if no longer used.
+
+4. Verify: Run `grep -n "sqlite3" src/sigil_ml/poller.py` -- should return no results.
+
+5. Verify: The only imports from `sigil_ml.store` should be `DataStore`.
+
+---
 
 ## Risks & Mitigations
 
-- **Risk**: The current poller uses a single connection per poll cycle for atomicity. With DataStore, each method opens its own connection. If the process crashes between cursor update and prediction write, the cursor may advance without predictions being written. **Mitigation**: This is acceptable because the poller is designed for eventual consistency -- predictions are ephemeral with TTLs, and the next cycle will generate new ones.
-- **Risk**: The `run()` loop catches `sqlite3.OperationalError`. After refactoring, this exception type won't be raised directly. **Mitigation**: Update to catch `Exception` broadly or add a base `StoreError` exception in a follow-up.
+- **Risk**: The poller's transactional pattern (poll + predict + cursor update in one commit) must be preserved. If the DataStore commits automatically per operation, the atomicity guarantee breaks. **Mitigation**: The `SqliteStore` uses a persistent connection within a poll cycle and only commits when `commit()` is called.
+- **Risk**: The `features.extract_stuck_features` and `extract_duration_features` still take `db_path` until WP03 refactors them. **Mitigation**: During WP02, pass `self.store.db_path` temporarily to maintain compatibility. Document this as a known tech debt resolved in WP03.
+- **Risk**: `sqlite3.OperationalError` is caught in `run()` to handle missing database. Generalizing to `Exception` might mask real bugs. **Mitigation**: Log at debug level (matching current behavior) and keep the "will retry" pattern.
 
 ## Review Guidance
 
-- Verify `poller.py` has zero `sqlite3` imports or usage.
-- Verify `EventPoller.__init__` takes `store: DataStore` (not `db_path`).
-- Verify all 5 prediction writes go through `store.insert_prediction`.
-- Verify `app.py` creates a store and passes it to the poller.
-- Run existing tests and verify no regressions.
+- Verify `poller.py` has ZERO `sqlite3` references after this WP.
+- Verify the `_poll_once` method still follows: get_cursor -> get_events -> classify -> update_cursor -> predict_and_write -> commit.
+- Verify `_predict_and_write` no longer takes a `conn` parameter.
+- Verify `_session_info` and `_quality_features` no longer take a `conn` parameter.
+- Verify the `_connect` and `_active_task_id` methods are removed.
+- Check that `app.py` still starts the poller correctly (interim wiring -- full wiring in WP05).
 
 ## Activity Log
 
-- 2026-03-29T16:29:57Z -- system -- lane=planned -- Prompt created.
+- 2026-03-30T01:45:06Z -- system -- lane=planned -- Prompt generated via /spec-kitty.tasks
