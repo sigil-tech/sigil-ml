@@ -1,31 +1,31 @@
 ---
 work_package_id: WP03
-title: Tenant Context Middleware and Routing
+title: Tenant Context Extraction and Routing
 lane: planned
 dependencies: [WP01]
 subtasks:
-- T012
 - T013
 - T014
 - T015
 - T016
-phase: Phase 2 - Core Implementation
+- T017
+phase: Phase 2 - Core Endpoints
 assignee: ''
 agent: ''
 shell_pid: ''
 review_status: ''
 reviewed_by: ''
 history:
-- timestamp: '2026-03-29T16:29:58Z'
+- timestamp: '2026-03-30T01:45:14Z'
   lane: planned
   agent: system
   shell_pid: ''
-  action: Prompt generated via /spec-kitty.tasks
+  action: Prompt regenerated via /spec-kitty.tasks
 requirement_refs:
 - FR-004
 ---
 
-# Work Package Prompt: WP03 -- Tenant Context Middleware and Routing
+# Work Package Prompt: WP03 -- Tenant Context Extraction and Routing
 
 ## Review Feedback Status
 
@@ -53,48 +53,64 @@ Use language identifiers in code blocks: ````python`, ````bash`
 
 ## Objectives & Success Criteria
 
-- Create a `TenantContext` dataclass representing per-request tenant identity.
-- Implement a FastAPI dependency that extracts the tenant ID from the `X-Sigil-Tenant` request header.
-- In cloud mode, all `/predict/*` endpoints require a valid tenant header; missing header returns 401.
-- In local mode, tenant extraction is bypassed and a sentinel local context is used.
-- Tenant ID appears in structured log output for cloud-mode requests.
+- Create `TenantContext` frozen dataclass with `tenant_id` and `tier` fields.
+- Implement a FastAPI dependency that extracts tenant ID from the `X-Tenant-ID` request header.
+- In cloud mode, missing header returns 401 Unauthorized.
+- In local mode, the dependency returns a sentinel `TenantContext(tenant_id="local", tier="local")` without checking any header.
+- Wire the tenant dependency into all `/predict/*` route handler signatures.
+- Header name is configurable via `SIGIL_TENANT_HEADER` env var (default `X-Tenant-ID`).
 
-**Success gate**: Send a cloud-mode request with `X-Sigil-Tenant: acme-corp` header, confirm the tenant ID is accessible in the route handler. Send without the header, receive a 401.
+**Measurable**:
+- Cloud mode request with `X-Tenant-ID: tenant-abc` -> handler receives `TenantContext(tenant_id="tenant-abc")`.
+- Cloud mode request without the header -> 401 response with descriptive error.
+- Local mode request without any header -> request succeeds, handler receives sentinel context.
+- `/health` and `/status` endpoints work without tenant header in both modes.
 
 ## Context & Constraints
 
-- **Spec**: FR-004 (read tenant identifier from incoming requests).
-- **Dependency**: WP01 must be complete -- `ServingMode` and `AppState.mode` must be available.
-- **API gateway assumption**: The upstream API gateway handles authentication and sets the `X-Sigil-Tenant` header. This WP only does header extraction, not authentication.
-- **No heavyweight deps**: The tenant module must use only stdlib + FastAPI/Pydantic.
+- **Spec**: FR-004 (read tenant identifier from incoming requests)
+- **Plan**: Design Decision D3 (tenant header name and behavior)
+- **Data Model**: `data-model.md` -- TenantContext entity definition
+- **Research**: R2 (tenant identification mechanism -- header extraction, no JWT)
+- **Prerequisite**: WP01 must be complete. `AppState.mode` must be available.
+
+**Key constraints**:
+- Do NOT implement authentication. The API gateway handles that. This is purely header extraction.
+- In local mode, the tenant context is created but never used for model routing (WP05 handles that).
+- The tenant dependency applies only to `/predict/*` endpoints, NOT to `/health`, `/status`, `/plugins`, or `/train`.
+
+**Implementation command**: `spec-kitty implement WP03 --base WP01`
 
 ## Subtasks & Detailed Guidance
 
-### Subtask T012 -- Create `TenantContext` dataclass in `src/sigil_ml/tenant.py`
+### Subtask T013 -- Create `TenantContext` dataclass in `src/sigil_ml/tenant.py`
 
-- **Purpose**: Provide a typed container for per-request tenant information that route handlers can depend on.
+- **Purpose**: Define the per-request tenant context that downstream handlers and the model cache (WP05) use for routing.
 - **Steps**:
-  1. Create a new file `src/sigil_ml/tenant.py`:
+  1. Create new file `src/sigil_ml/tenant.py`:
      ```python
-     """Tenant context for multi-tenant cloud serving."""
+     """Tenant context extraction for multi-tenant cloud serving."""
 
      from __future__ import annotations
 
+     import logging
+     import os
      from dataclasses import dataclass
 
-     # Sentinel for local mode -- no real tenancy.
+     logger = logging.getLogger(__name__)
+
+     # Sentinel for local mode -- not used for model routing.
      LOCAL_TENANT_ID = "local"
 
 
      @dataclass(frozen=True)
      class TenantContext:
-         """Per-request tenant identity extracted from the API gateway.
+         """Per-request tenant context extracted from the authenticated request.
 
-         Attributes:
-             tenant_id: Unique identifier for the tenant (from X-Sigil-Tenant header).
-             tier: Service tier for the tenant (default "default"). Reserved for future
-                   rate-limiting or feature-gating.
+         In cloud mode, populated from the X-Tenant-ID header (or configured header).
+         In local mode, returns a sentinel with tenant_id="local".
          """
+
          tenant_id: str
          tier: str = "default"
 
@@ -102,140 +118,150 @@ Use language identifiers in code blocks: ````python`, ````bash`
          def is_local(self) -> bool:
              """True when running in local mode (no real tenancy)."""
              return self.tenant_id == LOCAL_TENANT_ID
-
-         def __str__(self) -> str:
-             return f"tenant={self.tenant_id} tier={self.tier}"
      ```
-  2. Use `frozen=True` to make the context immutable after creation (safety for concurrent requests).
-- **Files**: `src/sigil_ml/tenant.py` (new file)
-- **Parallel?**: No -- downstream subtasks depend on this.
-- **Notes**: Keep this simple. The `tier` field is a forward-looking placeholder. It defaults to `"default"` and is not populated from headers yet.
+  2. Use `frozen=True` for immutability -- tenant context should not be modified after extraction.
+  3. `is_local` property allows handlers to easily check if tenant routing is active.
+- **Files**: `src/sigil_ml/tenant.py` (new file, ~25 lines)
+- **Parallel?**: No -- foundational for T014-T017.
+- **Notes**: This is a plain dataclass, NOT a Pydantic model. It is internal routing context, not a request/response schema.
 
-### Subtask T013 -- Implement FastAPI dependency for tenant extraction
+### Subtask T014 -- Implement FastAPI dependency function `get_tenant_context()`
 
-- **Purpose**: Create a reusable FastAPI `Depends()` callable that extracts tenant context from the request.
+- **Purpose**: Create a reusable FastAPI dependency that extracts tenant context from the request, respecting the serving mode.
 - **Steps**:
-  1. Add the dependency function to `src/sigil_ml/tenant.py`:
+  1. Add the dependency function and a factory to `src/sigil_ml/tenant.py`:
      ```python
-     import os
-     from fastapi import Request, HTTPException
+     from typing import TYPE_CHECKING
 
-     TENANT_HEADER = os.environ.get("SIGIL_TENANT_HEADER", "X-Sigil-Tenant")
+     from fastapi import HTTPException, Request
+
+     if TYPE_CHECKING:
+         from sigil_ml.app import AppState
 
 
-     def get_tenant_context(request: Request) -> TenantContext:
-         """FastAPI dependency that extracts tenant context from the request.
+     def tenant_header_name() -> str:
+         """Return the configured tenant header name."""
+         return os.environ.get("SIGIL_TENANT_HEADER", "X-Tenant-ID")
 
-         In cloud mode (determined by app state), the tenant header is required.
-         In local mode, returns a sentinel local context.
+
+     def make_tenant_dependency(state: "AppState"):
+         """Create a FastAPI dependency that extracts tenant context.
+
+         Uses a closure to capture the application state so the dependency
+         can check the serving mode.
+
+         Args:
+             state: Application state containing the serving mode.
+
+         Returns:
+             An async callable suitable for FastAPI Depends().
          """
-         from sigil_ml.config import ServingMode  # avoid circular import
+         from sigil_ml.config import ServingMode
 
-         # Access app state to check mode
-         state = request.app.state.app_state
+         async def get_tenant_context(request: Request) -> TenantContext:
+             """Extract tenant context from the request.
 
-         if state.mode == ServingMode.LOCAL:
-             return TenantContext(tenant_id=LOCAL_TENANT_ID, tier="local")
+             In cloud mode: reads X-Tenant-ID header, returns 401 if missing.
+             In local mode: returns sentinel context without checking headers.
+             """
+             if state.mode == ServingMode.LOCAL:
+                 return TenantContext(tenant_id=LOCAL_TENANT_ID, tier="local")
 
-         # Cloud mode: require tenant header
-         tenant_id = request.headers.get(TENANT_HEADER)
-         if not tenant_id or not tenant_id.strip():
-             raise HTTPException(
-                 status_code=401,
-                 detail=f"Missing required header: {TENANT_HEADER}",
-             )
+             header = tenant_header_name()
+             tenant_id = request.headers.get(header)
+             if not tenant_id or not tenant_id.strip():
+                 raise HTTPException(
+                     status_code=401,
+                     detail=f"Missing required header '{header}' for cloud mode.",
+                 )
+             return TenantContext(tenant_id=tenant_id.strip())
 
-         return TenantContext(tenant_id=tenant_id.strip())
+         return get_tenant_context
      ```
-  2. To make `state` accessible via `request.app.state`, update `create_app()` in `app.py` to store the AppState on the FastAPI app:
-     ```python
-     # In create_app(), after creating state:
-     application.state.app_state = state
-     ```
-  3. This pattern avoids passing `state` through closures and makes it accessible from any dependency.
-- **Files**: `src/sigil_ml/tenant.py`, `src/sigil_ml/app.py` (minor addition)
-- **Parallel?**: No -- T014 depends on this.
-- **Notes**: The deferred import of `ServingMode` avoids a potential circular import chain (`tenant` -> `config` -> ...). The `SIGIL_TENANT_HEADER` env var allows operators to customize the header name.
+  2. The closure pattern (`make_tenant_dependency(state)`) captures `state` so the dependency has access to the serving mode without needing `request.app.state`.
+  3. The deferred import of `ServingMode` inside the factory avoids potential circular import chains.
+- **Files**: `src/sigil_ml/tenant.py` (modify -- add ~30 lines)
+- **Parallel?**: No -- depends on T013, used by T015.
+- **Notes**: Alternative approach: access `request.app.state.app_state` directly. The closure approach is chosen because it is more explicit and testable (you can pass a mock state).
 
-### Subtask T014 -- Wire tenant dependency into all `/predict/*` route handlers
+### Subtask T015 -- Wire tenant dependency into all `/predict/*` route handler signatures
 
-- **Purpose**: Make tenant context available to each prediction endpoint for future model routing (WP05).
+- **Purpose**: Make tenant context available in every prediction handler so WP05 can use it for model routing.
 - **Steps**:
-  1. Import the dependency in `routes.py`:
+  1. In `src/sigil_ml/routes.py`, update `register_routes()` to create the tenant dependency:
      ```python
      from fastapi import Depends
-     from sigil_ml.tenant import TenantContext, get_tenant_context
+     from sigil_ml.tenant import TenantContext, make_tenant_dependency
+
+     def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
+         get_tenant = make_tenant_dependency(state)
+
+         # ... all existing route definitions below, with updated signatures
      ```
-  2. Add `tenant: TenantContext = Depends(get_tenant_context)` as a parameter to each predict handler:
+  2. Add `tenant: TenantContext = Depends(get_tenant)` parameter to ALL four `/predict/*` handlers:
      ```python
      @fastapi_app.post("/predict/stuck", response_model=StuckResponse)
      async def predict_stuck(
          req: StuckRequest,
-         tenant: TenantContext = Depends(get_tenant_context),
+         tenant: TenantContext = Depends(get_tenant),
      ) -> StuckResponse:
-         # For now, tenant is available but not used for model routing.
-         # WP05 will use tenant.tenant_id to look up tenant-specific models.
+         # tenant parameter available but not used yet (WP05 will use it)
          ...
      ```
-  3. Apply the same pattern to all five endpoints: `predict_stuck`, `predict_suggest`, `predict_duration`, `predict_quality`, and any others.
-  4. Do NOT change the endpoint logic yet -- just accept the parameter. WP05 uses it for model routing.
-- **Files**: `src/sigil_ml/routes.py`
-- **Parallel?**: No (applies to all endpoints).
-- **Notes**: Adding `Depends(get_tenant_context)` to the function signature means FastAPI will automatically call it and inject the result. In local mode, it returns the sentinel context; in cloud mode, it extracts from the header.
+  3. Apply to: `predict_stuck`, `predict_suggest`, `predict_duration`, `predict_quality`.
+  4. Do NOT add tenant dependency to `/health`, `/status`, `/plugins`, or `/train` -- those are operational endpoints.
+  5. The `tenant` parameter is available in handler bodies but not yet used. WP05 will add the model resolution logic that reads `tenant.tenant_id`.
+- **Files**: `src/sigil_ml/routes.py` (modify)
+- **Parallel?**: No -- depends on T014.
+- **Notes**: Adding `Depends(get_tenant)` means FastAPI automatically calls the dependency before the handler body. In cloud mode, missing header triggers 401 BEFORE any prediction logic runs. In local mode, sentinel context is injected silently.
 
-### Subtask T015 -- Return 401 when tenant header is missing in cloud mode
+### Subtask T016 -- Verify 401 on missing tenant header (cloud) and sentinel in local mode
 
-- **Purpose**: Enforce that cloud-mode requests always carry a tenant identifier.
+- **Purpose**: End-to-end verification that the two mode paths work correctly.
 - **Steps**:
-  1. This is already handled by the `get_tenant_context()` dependency in T013 which raises `HTTPException(status_code=401)` when the header is missing.
-  2. Verify the behavior:
-     - Cloud mode + header present -> 200 with prediction
-     - Cloud mode + header missing -> 401 with error message
-     - Local mode + header present -> 200 (header ignored, local context used)
-     - Local mode + header missing -> 200 (local context used)
-  3. If the `/health` and `/status` endpoints should be accessible without a tenant header (they are operational, not tenant-scoped), ensure they do NOT have the `get_tenant_context` dependency. Only `/predict/*` endpoints require it.
-- **Files**: `src/sigil_ml/routes.py`, `src/sigil_ml/tenant.py`
-- **Parallel?**: Yes (verification task).
-- **Notes**: Health and status endpoints must remain accessible without tenant headers for monitoring systems.
+  1. Verify the 401 path: In cloud mode, a request to `/predict/stuck` without `X-Tenant-ID` header should return:
+     ```json
+     {"detail": "Missing required header 'X-Tenant-ID' for cloud mode."}
+     ```
+     with HTTP 401 status.
+  2. Verify the local path: In local mode, a request to `/predict/stuck` without any header should succeed (the dependency injects `TenantContext(tenant_id="local", tier="local")`).
+  3. Verify the happy path: In cloud mode, a request WITH `X-Tenant-ID: my-tenant` should succeed.
+  4. Verify that `/health` and `/status` work WITHOUT any tenant header in both modes (they don't have the dependency).
+  5. Add comments documenting these three behaviors if not already present.
+- **Files**: `src/sigil_ml/tenant.py` (verify), `src/sigil_ml/routes.py` (verify)
+- **Parallel?**: Yes -- verification task, can run alongside T017.
 
-### Subtask T016 -- Add tenant ID to structured log output for cloud-mode requests
+### Subtask T017 -- Make header name configurable via `SIGIL_TENANT_HEADER` env var
 
-- **Purpose**: Enable operators to filter logs by tenant for debugging and audit.
+- **Purpose**: Allow operators to customize the tenant header name for API gateways that use different conventions.
 - **Steps**:
-  1. In each `/predict/*` handler (after the tenant dependency injection), add a log line:
+  1. Verify that `tenant_header_name()` (from T014) reads `SIGIL_TENANT_HEADER`:
      ```python
-     if not tenant.is_local:
-         logger.info("predict/stuck: tenant=%s", tenant.tenant_id)
+     def tenant_header_name() -> str:
+         return os.environ.get("SIGIL_TENANT_HEADER", "X-Tenant-ID")
      ```
-  2. Alternatively, create a small logging helper in `tenant.py`:
-     ```python
-     def log_tenant_request(logger: logging.Logger, endpoint: str, tenant: TenantContext) -> None:
-         """Log tenant context for cloud-mode requests."""
-         if not tenant.is_local:
-             logger.info("%s: tenant=%s tier=%s", endpoint, tenant.tenant_id, tenant.tier)
-     ```
-  3. Call it at the top of each predict handler:
-     ```python
-     log_tenant_request(logger, "predict/stuck", tenant)
-     ```
-- **Files**: `src/sigil_ml/routes.py`, `src/sigil_ml/tenant.py`
-- **Parallel?**: Yes (independent of T015).
-- **Notes**: Keep logging lightweight. Do not log the full request body (may contain sensitive features).
+  2. Verify `get_tenant_context()` calls `tenant_header_name()` dynamically (not hard-coded).
+  3. Test: set `SIGIL_TENANT_HEADER=X-Custom-Tenant`, send request with that header, verify extraction works.
+- **Files**: `src/sigil_ml/tenant.py` (verify)
+- **Parallel?**: Yes -- independent verification.
 
 ## Risks & Mitigations
 
-- **Circular imports**: `tenant.py` imports from `config.py`. `routes.py` imports from `tenant.py`. `app.py` imports from `routes.py`. Ensure no back-edges. The deferred import in `get_tenant_context()` handles this.
-- **Header injection**: In production, the API gateway must strip any user-provided `X-Sigil-Tenant` headers and set its own. This is an operational concern, not a code concern, but worth documenting.
-- **Performance**: The dependency is called on every request. It is trivially fast (one header lookup + one dataclass construction).
+| Risk | Probability | Impact | Mitigation |
+|------|-------------|--------|------------|
+| Circular imports | Low | Medium | Deferred import of `ServingMode` inside closure. `TYPE_CHECKING` guard for `AppState`. |
+| Header injection by end users | Medium | Low | API gateway must strip user-provided tenant headers. Operational concern, documented in quickstart. |
+| Performance overhead | Very Low | None | One header lookup + one dataclass construction per request. Negligible. |
 
 ## Review Guidance
 
-- Verify cloud mode with valid tenant header returns 200 for all `/predict/*` endpoints.
-- Verify cloud mode without tenant header returns 401 for `/predict/*` endpoints.
+- Verify cloud mode requests without `X-Tenant-ID` header return 401 for all `/predict/*` endpoints.
+- Verify local mode requests without any tenant header succeed normally.
 - Verify `/health` and `/status` work without a tenant header in both modes.
-- Verify local mode ignores the tenant header entirely and still works.
-- Check that `request.app.state.app_state` is set in `create_app()`.
+- Verify no circular imports between `tenant.py`, `config.py`, `app.py`, and `routes.py`.
+- Check that `SIGIL_TENANT_HEADER` env var is respected by `tenant_header_name()`.
+- Check that `TenantContext` is frozen (immutable).
 
 ## Activity Log
 
-- 2026-03-29T16:29:58Z -- system -- lane=planned -- Prompt created.
+- 2026-03-30T01:45:14Z -- system -- lane=planned -- Prompt regenerated.

@@ -1,31 +1,32 @@
 ---
 work_package_id: WP04
-title: Model Cache with TTL
+title: Model Cache with TTL and LRU Eviction
 lane: planned
 dependencies: []
 subtasks:
-- T017
 - T018
 - T019
 - T020
 - T021
-phase: Phase 2 - Core Implementation
+- T022
+- T023
+phase: Phase 2 - Core Endpoints
 assignee: ''
 agent: ''
 shell_pid: ''
 review_status: ''
 reviewed_by: ''
 history:
-- timestamp: '2026-03-29T16:29:58Z'
+- timestamp: '2026-03-30T01:45:14Z'
   lane: planned
   agent: system
   shell_pid: ''
-  action: Prompt generated via /spec-kitty.tasks
+  action: Prompt regenerated via /spec-kitty.tasks
 requirement_refs:
 - FR-010
 ---
 
-# Work Package Prompt: WP04 -- Model Cache with TTL
+# Work Package Prompt: WP04 -- Model Cache with TTL and LRU Eviction
 
 ## Review Feedback Status
 
@@ -54,30 +55,44 @@ Use language identifiers in code blocks: ````python`, ````bash`
 ## Objectives & Success Criteria
 
 - Implement a `ModelCache` class that stores model objects keyed by `(tenant_id, model_name)`.
-- Cache entries expire after a configurable TTL (default 300 seconds).
-- The cache is thread-safe for concurrent access from async workers.
-- Cache exposes statistics (hits, misses, evictions) for observability.
-- Maximum cache size prevents unbounded memory growth.
+- Cache entries expire after a configurable TTL (default 300 seconds) using `time.monotonic()`.
+- LRU eviction when the cache exceeds `max_size` (default 100 entries).
+- Thread-safe for concurrent access from uvicorn's async worker thread pool.
+- Cache exposes statistics (hits, misses, evictions) and a `loaded_tenants()` method for observability.
+- Configuration via `MODEL_CACHE_TTL_SECONDS` and `MODEL_CACHE_MAX_SIZE` environment variables.
+- Factory function `create_model_cache()` for standardized initialization.
 
-**Success gate**: Put a model in the cache, retrieve it (cache hit), wait past TTL, attempt retrieval (cache miss). Verify stats reflect the operations. Verify thread safety under concurrent access.
+**Measurable**:
+- `put()` a model, `get()` returns it (cache hit, stats reflect hit).
+- Wait past TTL, `get()` returns `None` (cache miss, stats reflect miss+eviction).
+- Put 101 models with `max_size=100`, verify oldest is evicted.
+- `stats()` returns accurate hit/miss/eviction counts.
+- `loaded_tenants()` returns only non-expired entries.
 
 ## Context & Constraints
 
-- **Spec**: FR-010 (cache loaded model weights with configurable TTL).
-- **No external dependencies**: Pure Python only (stdlib + typing). No Redis, no external cache.
-- **Memory safety**: Production deployments may serve many tenants. A cap on cache size is essential.
-- **Consumed by WP05**: The `ModelLoader` + `ModelCache` integration happens in WP05.
-- **Model objects**: Cache values are model instances (e.g., `StuckPredictor`, `ActivityClassifier`). These are moderately sized in-memory objects (scikit-learn estimators, typically 1-50 MB each).
+- **Spec**: FR-010 (cache loaded model weights with configurable TTL)
+- **Plan**: Design Decision D4 (model cache configuration)
+- **Data Model**: `data-model.md` -- ModelCache, ModelCacheEntry, CacheStats entities
+- **Research**: R3 (model cache design -- custom dict + lock, not cachetools)
+
+**Constraints**:
+- Pure Python only. No external dependencies (no Redis, no cachetools).
+- `time.monotonic()` for TTL (immune to system clock changes).
+- `threading.Lock` (not `asyncio.Lock`) because model loading may happen in thread pool executors.
+- This WP creates a standalone utility module. No integration with endpoints yet (that is WP05).
+
+**Implementation command**: `spec-kitty implement WP04`
 
 ## Subtasks & Detailed Guidance
 
-### Subtask T017 -- Create `ModelCache` class in `src/sigil_ml/cache.py`
+### Subtask T018 -- Create `ModelCache` class with `get()` / `put()` / `evict()` / `evict_all()`
 
-- **Purpose**: Provide the core cache data structure with `get()`, `put()`, and `evict()` operations.
+- **Purpose**: Provide the core cache data structure with all public operations.
 - **Steps**:
   1. Create `src/sigil_ml/cache.py`:
      ```python
-     """In-memory model cache with TTL expiration.
+     """In-memory model cache with TTL expiration and LRU eviction.
 
      Stores loaded model objects keyed by (tenant_id, model_name) with
      time-based expiration. Thread-safe for concurrent async access.
@@ -89,141 +104,167 @@ Use language identifiers in code blocks: ````python`, ````bash`
      import os
      import threading
      import time
-     from dataclasses import dataclass, field
+     from dataclasses import dataclass
      from typing import Any
 
      logger = logging.getLogger(__name__)
 
-     # Cache key type
+     # Type alias for cache key.
      CacheKey = tuple[str, str]  # (tenant_id, model_name)
 
 
      @dataclass
-     class CacheEntry:
-         """A single cached model with metadata."""
-         value: Any
-         created_at: float  # time.monotonic()
-         ttl_sec: float
+     class _CacheEntry:
+         """Internal: a single cached model with creation timestamp."""
 
-         @property
-         def is_expired(self) -> bool:
-             return (time.monotonic() - self.created_at) >= self.ttl_sec
+         model: Any
+         loaded_at: float  # time.monotonic() timestamp
 
 
      class ModelCache:
          """Thread-safe in-memory cache for tenant model objects.
 
          Args:
-             default_ttl_sec: Default time-to-live for cache entries in seconds.
-             max_size: Maximum number of entries. Oldest entries are evicted when full.
+             ttl_seconds: Time-to-live for cache entries in seconds.
+             max_size: Maximum number of entries before LRU eviction.
          """
 
          def __init__(
              self,
-             default_ttl_sec: float = 300.0,
+             ttl_seconds: float = 300.0,
              max_size: int = 100,
          ) -> None:
-             self._entries: dict[CacheKey, CacheEntry] = {}
-             self._default_ttl_sec = default_ttl_sec
+             self._entries: dict[CacheKey, _CacheEntry] = {}
+             self._ttl_seconds = ttl_seconds
              self._max_size = max_size
              self._lock = threading.Lock()
-             # Statistics
              self._hits = 0
              self._misses = 0
              self._evictions = 0
-
-         def get(self, tenant_id: str, model_name: str) -> Any | None:
-             """Retrieve a model from cache. Returns None on miss or expiry."""
-             ...
-
-         def put(self, tenant_id: str, model_name: str, value: Any, ttl_sec: float | None = None) -> None:
-             """Store a model in cache with optional custom TTL."""
-             ...
-
-         def evict(self, tenant_id: str) -> int:
-             """Remove all entries for a tenant. Returns count of evicted entries."""
-             ...
-
-         def evict_all(self) -> int:
-             """Clear the entire cache. Returns count of evicted entries."""
-             ...
-
-         def stats(self) -> dict[str, Any]:
-             """Return cache statistics."""
-             ...
      ```
   2. Implement `get()`:
      ```python
      def get(self, tenant_id: str, model_name: str) -> Any | None:
+         """Retrieve a model from cache.
+
+         Returns the model object on hit, None on miss or expiry.
+         """
          key = (tenant_id, model_name)
          with self._lock:
              entry = self._entries.get(key)
              if entry is None:
                  self._misses += 1
                  return None
-             if entry.is_expired:
+             age = time.monotonic() - entry.loaded_at
+             if age >= self._ttl_seconds:
                  del self._entries[key]
                  self._misses += 1
                  self._evictions += 1
                  return None
              self._hits += 1
-             return entry.value
+             return entry.model
      ```
   3. Implement `put()`:
      ```python
-     def put(self, tenant_id: str, model_name: str, value: Any, ttl_sec: float | None = None) -> None:
+     def put(
+         self, tenant_id: str, model_name: str, model: Any
+     ) -> None:
+         """Store a model in the cache.
+
+         If the cache is at capacity and the key is new, the oldest
+         entry is evicted first (LRU).
+         """
          key = (tenant_id, model_name)
-         ttl = ttl_sec if ttl_sec is not None else self._default_ttl_sec
-         entry = CacheEntry(value=value, created_at=time.monotonic(), ttl_sec=ttl)
+         entry = _CacheEntry(model=model, loaded_at=time.monotonic())
          with self._lock:
-             # Evict oldest if at capacity (and not replacing existing key)
              if key not in self._entries and len(self._entries) >= self._max_size:
                  self._evict_oldest_unlocked()
              self._entries[key] = entry
      ```
-- **Files**: `src/sigil_ml/cache.py` (new file)
-- **Parallel?**: No -- T018 and T019 extend this.
-- **Notes**: Use `time.monotonic()` instead of `time.time()` for TTL calculations -- it is not affected by system clock changes.
+  4. Implement `evict()` and `evict_all()`:
+     ```python
+     def evict(self, tenant_id: str) -> int:
+         """Remove all entries for a tenant. Returns count removed."""
+         with self._lock:
+             keys = [k for k in self._entries if k[0] == tenant_id]
+             for k in keys:
+                 del self._entries[k]
+             self._evictions += len(keys)
+             return len(keys)
 
-### Subtask T018 -- Implement TTL expiration logic
+     def evict_all(self) -> int:
+         """Clear the entire cache. Returns count removed."""
+         with self._lock:
+             count = len(self._entries)
+             self._entries.clear()
+             self._evictions += count
+             return count
+     ```
+- **Files**: `src/sigil_ml/cache.py` (new file, ~100 lines)
+- **Parallel?**: No -- T019-T023 extend this.
+- **Notes**: The `_CacheEntry` dataclass is private (underscore prefix) -- only `ModelCache` uses it. Cache values are model objects (e.g., `StuckPredictor` instances, typically 1-50 MB each).
 
-- **Purpose**: Ensure expired entries are removed and not served.
+### Subtask T019 -- Implement TTL expiration logic using `time.monotonic()`
+
+- **Purpose**: Ensure expired entries are removed on access and not served to callers.
 - **Steps**:
-  1. The `is_expired` property on `CacheEntry` handles individual entry expiration (done in T017).
-  2. Add a bulk cleanup method for periodic maintenance:
+  1. The per-entry TTL check is already in `get()` (T018): compare `time.monotonic() - entry.loaded_at` against `self._ttl_seconds`.
+  2. Add a bulk cleanup method for optional periodic maintenance:
      ```python
      def cleanup_expired(self) -> int:
-         """Remove all expired entries. Returns count removed."""
+         """Remove all expired entries. Returns count removed.
+
+         This is optional -- expiry is also checked lazily on get().
+         Useful for periodic maintenance to free memory.
+         """
+         now = time.monotonic()
          with self._lock:
-             expired_keys = [k for k, v in self._entries.items() if v.is_expired]
-             for k in expired_keys:
+             expired = [
+                 k for k, v in self._entries.items()
+                 if (now - v.loaded_at) >= self._ttl_seconds
+             ]
+             for k in expired:
                  del self._entries[k]
-             self._evictions += len(expired_keys)
-             return len(expired_keys)
+             self._evictions += len(expired)
+             return len(expired)
      ```
-  3. Add the LRU-style eviction for capacity management:
+  3. Expiration is checked lazily on `get()` (primary mechanism) and can be triggered explicitly via `cleanup_expired()` (secondary mechanism for memory reclamation).
+- **Files**: `src/sigil_ml/cache.py` (modify -- add ~15 lines)
+- **Parallel?**: No -- builds on T018.
+- **Notes**: `time.monotonic()` is immune to wall-clock adjustments (NTP jumps, DST changes). This is important for TTL accuracy in production.
+
+### Subtask T020 -- Implement LRU eviction when cache exceeds `max_size`
+
+- **Purpose**: Prevent unbounded memory growth by evicting the oldest entry when the cache is full.
+- **Steps**:
+  1. Add the private eviction helper (called within the lock by `put()`):
      ```python
      def _evict_oldest_unlocked(self) -> None:
-         """Evict the oldest entry. Must be called while holding self._lock."""
+         """Evict the entry with the oldest loaded_at timestamp.
+
+         MUST be called while holding self._lock.
+         """
          if not self._entries:
              return
-         oldest_key = min(self._entries, key=lambda k: self._entries[k].created_at)
+         oldest_key = min(
+             self._entries, key=lambda k: self._entries[k].loaded_at
+         )
          del self._entries[oldest_key]
          self._evictions += 1
          logger.debug("cache: evicted oldest entry %s", oldest_key)
      ```
-  4. Expiration is checked lazily on `get()` (already in T017) and can be triggered explicitly via `cleanup_expired()`.
-- **Files**: `src/sigil_ml/cache.py`
-- **Parallel?**: No -- builds on T017.
-- **Notes**: Lazy expiration (check on get) is sufficient for this use case. The `cleanup_expired()` method is available for optional periodic cleanup but not required.
+  2. This is already called by `put()` in T018 when `len(self._entries) >= self._max_size`.
+  3. With 5 models per tenant and `max_size=100`, this supports ~20 concurrent tenants. Operators can increase via env var.
+- **Files**: `src/sigil_ml/cache.py` (modify -- add ~10 lines)
+- **Parallel?**: No -- builds on T018.
 
-### Subtask T019 -- Configurable TTL via environment variable
+### Subtask T021 -- Configurable TTL and max_size via environment variables
 
-- **Purpose**: Allow operators to tune cache TTL without code changes (useful in K8s ConfigMaps).
+- **Purpose**: Allow operators to tune cache behavior without code changes (K8s ConfigMaps).
 - **Steps**:
-  1. Add a factory function that reads the env var:
+  1. Add constants and a factory function at the module level:
      ```python
-     DEFAULT_TTL_SEC = 300.0
+     DEFAULT_TTL_SECONDS = 300.0
      DEFAULT_MAX_SIZE = 100
 
 
@@ -231,107 +272,102 @@ Use language identifiers in code blocks: ````python`, ````bash`
          """Create a ModelCache with settings from environment variables.
 
          Env vars:
-             SIGIL_MODEL_CACHE_TTL_SEC: TTL in seconds (default 300).
-             SIGIL_MODEL_CACHE_MAX_SIZE: Maximum entries (default 100).
+             MODEL_CACHE_TTL_SECONDS: TTL in seconds (default 300).
+             MODEL_CACHE_MAX_SIZE: Maximum entries (default 100).
          """
-         ttl = float(os.environ.get("SIGIL_MODEL_CACHE_TTL_SEC", str(DEFAULT_TTL_SEC)))
-         max_size = int(os.environ.get("SIGIL_MODEL_CACHE_MAX_SIZE", str(DEFAULT_MAX_SIZE)))
-         logger.info("cache: created with ttl=%ss, max_size=%d", ttl, max_size)
-         return ModelCache(default_ttl_sec=ttl, max_size=max_size)
+         ttl = float(
+             os.environ.get("MODEL_CACHE_TTL_SECONDS", str(DEFAULT_TTL_SECONDS))
+         )
+         max_size = int(
+             os.environ.get("MODEL_CACHE_MAX_SIZE", str(DEFAULT_MAX_SIZE))
+         )
+         logger.info("cache: created with ttl=%.0fs, max_size=%d", ttl, max_size)
+         return ModelCache(ttl_seconds=ttl, max_size=max_size)
      ```
-  2. This factory will be called in WP05 when initializing the cache in `AppState`.
-- **Files**: `src/sigil_ml/cache.py`
-- **Parallel?**: No -- minor addition.
-- **Notes**: Env var names follow the `SIGIL_` prefix convention established in `config.py`.
+  2. WP05 will call `create_model_cache()` when initializing `AppState` in cloud mode.
+- **Files**: `src/sigil_ml/cache.py` (modify -- add ~15 lines)
+- **Parallel?**: Yes -- independent utility function.
+- **Notes**: The env var names `MODEL_CACHE_TTL_SECONDS` and `MODEL_CACHE_MAX_SIZE` match the plan (Design Decision D4).
 
-### Subtask T020 -- Cache statistics: hits, misses, evictions
+### Subtask T022 -- Cache statistics tracking: hits, misses, evictions
 
-- **Purpose**: Expose metrics for the `/status` endpoint (WP06) and debugging.
+- **Purpose**: Expose metrics for the `/status` endpoint (WP06) and operational debugging.
 - **Steps**:
   1. Implement the `stats()` method:
      ```python
      def stats(self) -> dict[str, Any]:
          """Return cache statistics for observability."""
          with self._lock:
-             total_requests = self._hits + self._misses
-             hit_rate = self._hits / total_requests if total_requests > 0 else 0.0
+             total = self._hits + self._misses
              return {
                  "entries": len(self._entries),
                  "max_size": self._max_size,
-                 "default_ttl_sec": self._default_ttl_sec,
+                 "ttl_seconds": self._ttl_seconds,
                  "hits": self._hits,
                  "misses": self._misses,
                  "evictions": self._evictions,
-                 "hit_rate": round(hit_rate, 4),
+                 "hit_rate": round(self._hits / total, 4) if total > 0 else 0.0,
              }
      ```
-  2. Add a method to list loaded tenants:
+  2. Add a method to list loaded tenants (used by WP06's `/status` and `/health`):
      ```python
      def loaded_tenants(self) -> dict[str, list[str]]:
-         """Return a mapping of tenant_id -> list of cached model names."""
+         """Return mapping of tenant_id -> list of cached model names.
+
+         Only includes non-expired entries.
+         """
+         now = time.monotonic()
          with self._lock:
              result: dict[str, list[str]] = {}
              for (tenant_id, model_name), entry in self._entries.items():
-                 if not entry.is_expired:
+                 if (now - entry.loaded_at) < self._ttl_seconds:
                      result.setdefault(tenant_id, []).append(model_name)
              return result
      ```
-- **Files**: `src/sigil_ml/cache.py`
-- **Parallel?**: Yes (independent of T021).
-- **Notes**: These stats are in-memory and reset on restart. This is acceptable for a stateless cloud service.
+- **Files**: `src/sigil_ml/cache.py` (modify -- add ~25 lines)
+- **Parallel?**: Yes -- independent of T023.
+- **Notes**: Stats are in-memory and reset on restart. Acceptable for a stateless cloud service.
 
-### Subtask T021 -- Thread-safety with `threading.Lock`
+### Subtask T023 -- Thread-safety with `threading.Lock`
 
-- **Purpose**: FastAPI runs handlers concurrently via asyncio + threadpool. The cache must be safe for concurrent access.
+- **Purpose**: Uvicorn runs async handlers via a thread pool. The cache must be safe for concurrent reads and writes.
 - **Steps**:
-  1. The `threading.Lock` is already initialized in T017's constructor.
-  2. Verify that ALL methods that access `self._entries` or statistics counters acquire the lock:
-     - `get()` -- acquires lock (T017)
-     - `put()` -- acquires lock (T017)
-     - `evict()` -- must acquire lock
-     - `evict_all()` -- must acquire lock
-     - `cleanup_expired()` -- acquires lock (T018)
-     - `stats()` -- acquires lock (T020)
-     - `loaded_tenants()` -- acquires lock (T020)
-  3. Implement `evict()` and `evict_all()`:
-     ```python
-     def evict(self, tenant_id: str) -> int:
-         """Remove all entries for a tenant. Returns count of evicted entries."""
-         with self._lock:
-             keys_to_remove = [k for k in self._entries if k[0] == tenant_id]
-             for k in keys_to_remove:
-                 del self._entries[k]
-             self._evictions += len(keys_to_remove)
-             return len(keys_to_remove)
-
-     def evict_all(self) -> int:
-         """Clear the entire cache. Returns count of evicted entries."""
-         with self._lock:
-             count = len(self._entries)
-             self._entries.clear()
-             self._evictions += count
-             return count
-     ```
-  4. Verify no method reads or writes shared state without the lock.
-- **Files**: `src/sigil_ml/cache.py`
-- **Parallel?**: Yes (independent of T020).
-- **Notes**: `threading.Lock` (not `asyncio.Lock`) is correct here because model loading may happen in thread pool executors. `threading.Lock` works across both sync and async contexts.
+  1. The `threading.Lock` is already initialized in T018's constructor as `self._lock`.
+  2. **Verification**: Ensure ALL methods that access `self._entries` or statistics counters acquire the lock:
+     - `get()` -- acquires lock (T018)
+     - `put()` -- acquires lock (T018)
+     - `evict()` -- acquires lock (T018)
+     - `evict_all()` -- acquires lock (T018)
+     - `cleanup_expired()` -- acquires lock (T019)
+     - `stats()` -- acquires lock (T022)
+     - `loaded_tenants()` -- acquires lock (T022)
+     - `_evict_oldest_unlocked()` -- called within lock by `put()` (T020)
+  3. Ensure `_evict_oldest_unlocked()` does NOT acquire the lock (it is called while the lock is already held -- acquiring would deadlock).
+  4. Add a docstring note on `_evict_oldest_unlocked()`: "Must be called while holding self._lock."
+- **Files**: `src/sigil_ml/cache.py` (verify/audit)
+- **Parallel?**: Yes -- verification task.
+- **Notes**: `threading.Lock` (not `asyncio.Lock`) is correct because model loading happens in `run_in_executor()` thread pool contexts. `threading.Lock` works across both sync and async code paths.
 
 ## Risks & Mitigations
 
-- **Memory growth**: The `max_size` cap (default 100 entries) prevents unbounded growth. With 5 models per tenant, this supports 20 concurrent tenants. Adjust via env var for larger deployments.
-- **Thundering herd**: When a popular tenant's cache entry expires, multiple concurrent requests may all attempt to reload. WP05 should add a loading lock per key to prevent this. The cache itself does not handle this.
-- **Stale models**: TTL-based expiration means a model could be stale for up to `ttl_sec` after an update. This is acceptable for ML models which change infrequently.
+| Risk | Probability | Impact | Mitigation |
+|------|-------------|--------|------------|
+| Memory growth | Low | Medium | LRU eviction at `max_size` (default 100). TTL prevents indefinite staleness. Configurable via env var. |
+| Thundering herd on cache miss | Medium | Low | Not handled in this WP. WP05 should add per-key loading lock. |
+| Stale models served | Low | Low | TTL ensures max staleness is `ttl_seconds`. Operators can reduce TTL for faster refresh. |
+| Deadlock from nested lock acquisition | Low | High | `_evict_oldest_unlocked()` never acquires the lock itself. Documented clearly. |
 
 ## Review Guidance
 
-- Verify all public methods acquire the lock before accessing shared state.
-- Verify `time.monotonic()` is used (not `time.time()`).
+- Verify ALL public methods acquire the lock before accessing shared state.
+- Verify `time.monotonic()` is used everywhere (NOT `time.time()`).
 - Verify expired entries are not returned by `get()`.
-- Verify `max_size` eviction works (put 101 entries with max_size=100, verify oldest is evicted).
-- Verify `stats()` returns accurate counts after a sequence of get/put/evict operations.
-- Verify no external dependencies are imported.
+- Verify LRU eviction: put `max_size + 1` entries, verify the oldest is evicted.
+- Verify `stats()` returns accurate counts after a sequence of operations.
+- Verify `loaded_tenants()` excludes expired entries.
+- Verify no external dependencies are imported (only stdlib + typing).
+- Verify `_evict_oldest_unlocked()` does NOT acquire the lock.
 
 ## Activity Log
 
-- 2026-03-29T16:29:58Z -- system -- lane=planned -- Prompt created.
+- 2026-03-30T01:45:14Z -- system -- lane=planned -- Prompt regenerated.

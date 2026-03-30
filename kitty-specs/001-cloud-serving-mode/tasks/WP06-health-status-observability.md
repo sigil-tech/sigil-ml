@@ -2,14 +2,13 @@
 work_package_id: WP06
 title: Cloud-Aware Health, Status, and Observability
 lane: planned
-dependencies:
-- WP04
+dependencies: [WP05]
 subtasks:
-- T028
-- T029
 - T030
 - T031
 - T032
+- T033
+- T034
 phase: Phase 4 - Polish
 assignee: ''
 agent: ''
@@ -17,11 +16,11 @@ shell_pid: ''
 review_status: ''
 reviewed_by: ''
 history:
-- timestamp: '2026-03-29T16:29:58Z'
+- timestamp: '2026-03-30T01:45:14Z'
   lane: planned
   agent: system
   shell_pid: ''
-  action: Prompt generated via /spec-kitty.tasks
+  action: Prompt regenerated via /spec-kitty.tasks
 requirement_refs:
 - FR-007
 ---
@@ -54,28 +53,42 @@ Use language identifiers in code blocks: ````python`, ````bash`
 
 ## Objectives & Success Criteria
 
-- The `/health` endpoint includes a `mode` field (`"local"` or `"cloud"`) in its response.
-- In cloud mode, `/health` reports model availability without referencing SQLite or poller state.
-- In cloud mode, `/status` lists loaded tenants, their model versions, and cache statistics.
-- Per-tenant request counters are available for operational monitoring.
+- `/health` endpoint includes an optional `mode` field (`"local"` or `"cloud"`) in its response.
+- In cloud mode, `/health` reports model availability based on cache state (not SQLite/poller).
+- In cloud mode, `/status` lists loaded tenants, model names, cache statistics, and per-tenant request counts.
+- Per-tenant request counters are tracked in-memory and exposed via `/status`.
 - Startup logs clearly indicate the operating mode.
+- In local mode, both endpoints remain exactly as they are today -- zero regression.
 
-**Success gate**: Start in cloud mode, call `GET /health`, verify `mode: "cloud"` in response. Call `GET /status`, verify tenant/cache information. Verify no SQLite references in cloud-mode responses.
+**Measurable**:
+- `GET /health` in cloud mode returns `{"status": "ok", "mode": "cloud", "models": {...}, "uptime_sec": ...}`.
+- `GET /status` in cloud mode returns cache stats, loaded tenants, and request counts.
+- `GET /health` in local mode returns the existing response (now with `mode: "local"` added).
+- No `X-Tenant-ID` header required for either endpoint.
 
 ## Context & Constraints
 
-- **Spec**: FR-007 (health endpoint reflects operating mode and model availability).
-- **Dependencies**: WP01 (mode awareness), WP04 (cache stats), WP05 (tenant model loading).
-- **Backward compatibility**: Adding `mode` to `HealthResponse` must not break existing consumers. Use a default value.
-- **No tenant header required**: Health and status endpoints are operational (not tenant-scoped) and must work without the `X-Sigil-Tenant` header.
+- **Spec**: FR-007 (health endpoint reflects operating mode and model availability)
+- **Plan**: Design Decisions D6 (endpoint guards), D7 (create_app changes)
+- **Research**: R7 (health endpoint extension -- optional `mode` field)
+- **Dependencies**: WP01 (mode awareness), WP04 (cache stats via `ModelCache.stats()` and `loaded_tenants()`), WP05 (model loading wired up)
+
+**Current code** (`src/sigil_ml/routes.py`):
+- `HealthResponse` (line 83): Has `status`, `models`, `uptime_sec`. No `mode` field.
+- `health()` handler (line 98): Iterates over `state.stuck`, `state.activity`, etc. Reports `is_trained` status.
+- `status()` handler (line 120): Opens SQLite connection, queries `ml_cursor` and `ml_predictions`.
+
+**Backward compatibility**: Adding `mode` to `HealthResponse` must not break existing consumers. Use `mode: str = "local"` (default value).
+
+**Implementation command**: `spec-kitty implement WP06 --base WP05`
 
 ## Subtasks & Detailed Guidance
 
-### Subtask T028 -- Update `HealthResponse` schema to include `mode` field
+### Subtask T030 -- Add optional `mode` field to `HealthResponse` schema
 
-- **Purpose**: Make the operating mode visible in health check responses.
+- **Purpose**: Make the operating mode visible in health check responses for monitoring systems and K8s probes.
 - **Steps**:
-  1. Update `HealthResponse` in `routes.py`:
+  1. Update `HealthResponse` in `src/sigil_ml/routes.py`:
      ```python
      class HealthResponse(BaseModel):
          status: str
@@ -83,36 +96,37 @@ Use language identifiers in code blocks: ````python`, ````bash`
          models: dict[str, str]
          uptime_sec: float
      ```
-  2. The `mode` field has a default of `"local"` so existing consumers that don't expect it can still parse the response.
-- **Files**: `src/sigil_ml/routes.py`
-- **Parallel?**: No -- T029 depends on this.
-- **Notes**: Using a string field (not `ServingMode` enum) for the response avoids coupling the API schema to internal enums.
+  2. The default `"local"` ensures existing consumers parsing the response without expecting `mode` continue to work.
+  3. Both cloud and local health handlers will explicitly set this field.
+- **Files**: `src/sigil_ml/routes.py` (modify -- add 1 field)
+- **Parallel?**: No -- T031 depends on this schema change.
+- **Notes**: Using a plain `str` field (not the `ServingMode` enum) avoids coupling the API schema to internal types.
 
-### Subtask T029 -- Update `/health` handler to report cloud-specific state
+### Subtask T031 -- Update `/health` handler to report cloud-specific state
 
-- **Purpose**: In cloud mode, the health response should reflect cloud-specific information.
+- **Purpose**: In cloud mode, the health response should reflect cache-based model availability rather than local model instance status.
 - **Steps**:
-  1. Update the `health()` handler:
+  1. Update the `health()` handler to branch on mode:
      ```python
      @fastapi_app.get("/health", response_model=HealthResponse)
      async def health() -> HealthResponse:
          if state.mode == ServingMode.CLOUD:
-             # Cloud mode: report cache-based model availability
              models_status: dict[str, str] = {}
              if state.model_cache:
                  tenants = state.model_cache.loaded_tenants()
-                 if tenants:
-                     # Report models as "cached" if any tenant has them loaded
-                     all_models = set()
-                     for model_list in tenants.values():
-                         all_models.update(model_list)
-                     for name in ["stuck", "activity", "workflow", "duration", "quality"]:
-                         models_status[name] = "cached" if name in all_models else "on_demand"
-                 else:
-                     for name in ["stuck", "activity", "workflow", "duration", "quality"]:
-                         models_status[name] = "on_demand"
+                 all_cached_models: set[str] = set()
+                 for model_list in tenants.values():
+                     all_cached_models.update(model_list)
+                 for name in [
+                     "stuck", "activity", "workflow", "duration", "quality"
+                 ]:
+                     models_status[name] = (
+                         "cached" if name in all_cached_models else "on_demand"
+                     )
              else:
-                 for name in ["stuck", "activity", "workflow", "duration", "quality"]:
+                 for name in [
+                     "stuck", "activity", "workflow", "duration", "quality"
+                 ]:
                      models_status[name] = "not_initialized"
 
              return HealthResponse(
@@ -122,7 +136,7 @@ Use language identifiers in code blocks: ````python`, ````bash`
                  uptime_sec=round(time.time() - _start_time, 1),
              )
 
-         # Local mode: existing behavior (unchanged)
+         # Local mode: existing behavior with mode field added
          models_status = {}
          for name, model in [
              ("stuck", state.stuck),
@@ -131,11 +145,15 @@ Use language identifiers in code blocks: ````python`, ````bash`
              ("duration", state.duration),
          ]:
              if model is not None:
-                 models_status[name] = "ready" if model.is_trained else "untrained"
+                 models_status[name] = (
+                     "ready" if model.is_trained else "untrained"
+                 )
              else:
                  models_status[name] = "not_loaded"
 
-         models_status["quality"] = "ready" if state.quality is not None else "not_loaded"
+         models_status["quality"] = (
+             "ready" if state.quality is not None else "not_loaded"
+         )
 
          return HealthResponse(
              status="ok",
@@ -145,81 +163,93 @@ Use language identifiers in code blocks: ````python`, ````bash`
          )
      ```
   2. Cloud mode model statuses:
-     - `"cached"`: Model is currently in the cache for at least one tenant.
-     - `"on_demand"`: Model is not cached but will be loaded on first request.
-     - `"not_initialized"`: Cache/loader not yet initialized (should not happen after startup).
-- **Files**: `src/sigil_ml/routes.py`
-- **Parallel?**: No (modifies the health handler).
-- **Notes**: The cloud-mode health check does not enumerate all tenants (that's what `/status` is for). It gives a high-level view of service readiness.
+     - `"cached"`: Model is in the cache for at least one tenant.
+     - `"on_demand"`: Model will be loaded on first request (cold cache).
+     - `"not_initialized"`: Cache not yet initialized (should not happen post-startup).
+  3. Local mode now explicitly sets `mode="local"` -- a minor addition to the existing response.
+- **Files**: `src/sigil_ml/routes.py` (modify)
+- **Parallel?**: No -- modifies the health handler.
 
-### Subtask T030 -- Rewrite `/status` handler for cloud mode
+### Subtask T032 -- Rewrite `/status` handler for cloud mode
 
-- **Purpose**: Provide detailed operational information in cloud mode: loaded tenants, model versions, cache statistics.
+- **Purpose**: Replace the WP02 stub with real operational data from the cache and loader.
 - **Steps**:
-  1. Update the `status()` handler's cloud-mode branch (building on WP02's T011 stub):
+  1. Update the cloud-mode branch of `status()` (replacing WP02's minimal stub):
      ```python
      @fastapi_app.get("/status")
      async def status() -> dict:
          if state.mode == ServingMode.CLOUD:
-             cache_stats = state.model_cache.stats() if state.model_cache else {}
-             loaded = state.model_cache.loaded_tenants() if state.model_cache else {}
+             cache_stats = (
+                 state.model_cache.stats() if state.model_cache else {}
+             )
+             loaded = (
+                 state.model_cache.loaded_tenants()
+                 if state.model_cache
+                 else {}
+             )
              return {
                  "mode": "cloud",
                  "cache": cache_stats,
                  "loaded_tenants": loaded,
-                 "request_counts": dict(_request_counters),  # from T031
+                 "request_counts": dict(getattr(state, "request_counters", {})),
                  "poller_running": False,
              }
 
-         # Local mode: existing implementation (unchanged)
+         # Local mode: existing SQLite-based status (unchanged)
          db = config.db_path()
-         ...
+         try:
+             conn = sqlite3.connect(str(db), timeout=5.0)
+             # ... rest of existing code unchanged ...
      ```
-  2. The `loaded_tenants` value is a dict like `{"acme": ["stuck", "workflow"], "globex": ["stuck"]}`.
-  3. The `cache` value includes hits, misses, evictions, hit_rate from `ModelCache.stats()`.
-- **Files**: `src/sigil_ml/routes.py`
-- **Parallel?**: No (builds on T029 pattern).
-- **Notes**: This replaces the stub from WP02 T011 with real data from the cache.
+  2. The response now includes:
+     - `cache`: Stats from `ModelCache.stats()` -- entries, hits, misses, evictions, hit_rate.
+     - `loaded_tenants`: Dict of `{tenant_id: [model_names]}` from `ModelCache.loaded_tenants()`.
+     - `request_counts`: Per-tenant request counts from T033.
+  3. Local mode status handler remains completely unchanged.
+- **Files**: `src/sigil_ml/routes.py` (modify)
+- **Parallel?**: No -- builds on WP02 T012 stub.
 
-### Subtask T031 -- Add per-tenant request counters
+### Subtask T033 -- Add per-tenant request counters
 
 - **Purpose**: Enable operators to see which tenants are active and their request volumes.
 - **Steps**:
-  1. Add a simple in-memory counter at module level in `routes.py`:
+  1. Add a request counter dict to `AppState` in `src/sigil_ml/app.py`:
      ```python
-     from collections import defaultdict
-
-     # Per-tenant request counters (reset on restart).
-     _request_counters: dict[str, int] = defaultdict(int)
+     class AppState:
+         def __init__(self, mode: ServingMode = ServingMode.LOCAL) -> None:
+             # ... existing fields ...
+             # Per-tenant request counters (cloud mode, reset on restart)
+             self.request_counters: dict[str, int] = {}
      ```
-  2. Increment the counter in each `/predict/*` handler:
+  2. Add a helper method:
      ```python
-     async def predict_stuck(req: StuckRequest, tenant: TenantContext = Depends(get_tenant_context)) -> StuckResponse:
-         if not tenant.is_local:
-             _request_counters[tenant.tenant_id] += 1
-         ...
+     def count_request(self, tenant_id: str) -> None:
+         """Increment the request counter for a tenant."""
+         self.request_counters[tenant_id] = (
+             self.request_counters.get(tenant_id, 0) + 1
+         )
      ```
-  3. Alternatively, create a helper:
+  3. Call `state.count_request(tenant.tenant_id)` at the top of each `/predict/*` handler in cloud mode:
      ```python
-     def _count_request(tenant: TenantContext) -> None:
-         if not tenant.is_local:
-             _request_counters[tenant.tenant_id] += 1
+     if state.mode == ServingMode.CLOUD:
+         state.count_request(tenant.tenant_id)
      ```
-  4. Expose in the `/status` response (done in T030).
-- **Files**: `src/sigil_ml/routes.py`
-- **Parallel?**: Yes (independent utility).
-- **Notes**: `defaultdict(int)` is not strictly thread-safe for reads+writes, but Python's GIL makes single-operation increments safe in practice. For a production system, consider `threading.Lock` or atomic counters. For MVP, this is acceptable.
+  4. Expose in `/status` response (done in T032).
+- **Files**: `src/sigil_ml/app.py` (modify -- add ~10 lines), `src/sigil_ml/routes.py` (add counter call to each handler)
+- **Parallel?**: Yes -- independent of health/status handler changes.
+- **Notes**: Using a plain `dict[str, int]` is not strictly thread-safe for concurrent reads+writes, but Python's GIL makes single-operation increments safe in practice. For production, consider `threading.Lock` or `collections.Counter`. For this feature, a plain dict is acceptable.
 
-### Subtask T032 -- Add `mode` to startup and structured log output
+### Subtask T034 -- Add `mode` field to startup log message and structured output
 
-- **Purpose**: Make the operating mode immediately visible in logs for debugging and monitoring.
+- **Purpose**: Make the operating mode immediately visible in logs for debugging.
 - **Steps**:
-  1. The startup log line was partially addressed in WP01 T004. Ensure it clearly states the mode:
+  1. The startup log lines were already updated in WP01 T005. Verify they clearly state the mode:
      ```python
-     # In create_app() startup_event:
-     logger.info("sigil-ml: started in %s mode", state.mode.value)
+     logger.info("sigil-ml: local mode -- models loaded, poller started, scheduler active")
+     # and
+     logger.info("sigil-ml: cloud mode -- cache and loader initialized")
      ```
-  2. Add mode to the application metadata:
+  2. Optionally, update the FastAPI app description to include mode:
      ```python
      application = FastAPI(
          title="sigil-ml",
@@ -227,31 +257,38 @@ Use language identifiers in code blocks: ````python`, ````bash`
          description=f"Sigil ML sidecar ({mode.value} mode)",
      )
      ```
-  3. Consider adding a `/` root endpoint for quick identification:
+  3. Optionally, add a root endpoint for quick identification:
      ```python
      @fastapi_app.get("/")
      async def root() -> dict:
-         return {"service": "sigil-ml", "mode": state.mode.value, "version": "0.1.0"}
+         return {
+             "service": "sigil-ml",
+             "mode": state.mode.value,
+             "version": "0.1.0",
+         }
      ```
-- **Files**: `src/sigil_ml/app.py`, `src/sigil_ml/routes.py`
-- **Parallel?**: Yes (independent of other subtasks).
-- **Notes**: This is a small polish subtask. The root endpoint is optional but useful for operators who curl the service to check what's running.
+- **Files**: `src/sigil_ml/app.py` (verify/modify), `src/sigil_ml/routes.py` (optional root endpoint)
+- **Parallel?**: Yes -- independent polish.
+- **Notes**: The root endpoint is optional but useful for operators who `curl` the service.
 
 ## Risks & Mitigations
 
-- **HealthResponse schema change**: Adding `mode` with a default value is backward compatible. Consumers that don't parse `mode` will continue to work.
-- **Request counter memory**: In a long-running service with many tenants, the counter dict could grow. Since it resets on restart and tenants are typically bounded, this is acceptable. For extreme cases, add a max-tenants cap.
-- **Status endpoint information leak**: The `/status` endpoint reveals tenant IDs and request counts. In production, ensure it is not publicly accessible (K8s service-internal only).
+| Risk | Probability | Impact | Mitigation |
+|------|-------------|--------|------------|
+| HealthResponse schema change breaks consumers | Low | Medium | `mode` field has default value `"local"`. Existing parsers ignoring unknown fields are unaffected. |
+| Request counter memory growth | Very Low | Low | Tenants are bounded in practice. Counter resets on restart. |
+| `/status` information leak | Medium | Low | Reveals tenant IDs and request counts. Ensure endpoint is not publicly accessible (K8s internal service). |
 
 ## Review Guidance
 
 - Verify `GET /health` returns `mode: "cloud"` in cloud mode and `mode: "local"` in local mode.
 - Verify `GET /health` does NOT reference SQLite or poller in cloud mode.
-- Verify `GET /status` returns cache stats and loaded tenants in cloud mode.
+- Verify `GET /status` returns cache stats (`hits`, `misses`, `evictions`, `hit_rate`) and loaded tenants in cloud mode.
 - Verify `GET /status` returns the existing SQLite-based response in local mode (no regression).
-- Verify `/health` and `/status` work without `X-Sigil-Tenant` header in both modes.
-- Verify request counters increment per tenant in cloud mode.
+- Verify `/health` and `/status` work WITHOUT `X-Tenant-ID` header in both modes.
+- Verify request counters increment per-tenant when predictions are served in cloud mode.
+- Run all existing tests -- zero regression.
 
 ## Activity Log
 
-- 2026-03-29T16:29:58Z -- system -- lane=planned -- Prompt created.
+- 2026-03-30T01:45:14Z -- system -- lane=planned -- Prompt regenerated.

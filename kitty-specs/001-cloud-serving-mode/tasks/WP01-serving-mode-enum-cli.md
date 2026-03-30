@@ -1,6 +1,6 @@
 ---
 work_package_id: WP01
-title: ServingMode Enum, Config, and CLI Flag
+title: ServingMode Enum, CLI Flag, and Conditional Startup
 lane: planned
 dependencies: []
 subtasks:
@@ -9,6 +9,7 @@ subtasks:
 - T003
 - T004
 - T005
+- T006
 phase: Phase 1 - Foundation
 assignee: ''
 agent: ''
@@ -16,11 +17,11 @@ shell_pid: ''
 review_status: ''
 reviewed_by: ''
 history:
-- timestamp: '2026-03-29T16:29:58Z'
+- timestamp: '2026-03-30T01:45:14Z'
   lane: planned
   agent: system
   shell_pid: ''
-  action: Prompt generated via /spec-kitty.tasks
+  action: Prompt regenerated via /spec-kitty.tasks
 requirement_refs:
 - FR-001
 - FR-002
@@ -28,7 +29,7 @@ requirement_refs:
 - FR-008
 ---
 
-# Work Package Prompt: WP01 -- ServingMode Enum, Config, and CLI Flag
+# Work Package Prompt: WP01 -- ServingMode Enum, CLI Flag, and Conditional Startup
 
 ## Review Feedback Status
 
@@ -56,189 +57,256 @@ Use language identifiers in code blocks: ````python`, ````bash`
 
 ## Objectives & Success Criteria
 
-- Introduce a `ServingMode` enum (`local` / `cloud`) that the rest of the codebase can import and branch on.
-- Wire `--mode local|cloud` into the CLI `serve` subcommand.
-- Make `create_app()` accept the mode and conditionally skip SQLite, the EventPoller, and the TrainingScheduler when running in cloud mode.
-- Existing `sigil-ml serve` (no flag) must behave identically to today -- zero regressions.
-- The module-level `app = create_app()` line must continue to work for `uvicorn sigil_ml.app:app`.
+- Introduce a `ServingMode` str enum with `local` and `cloud` values in `config.py`.
+- Add a `--mode` flag to the `serve` CLI subcommand with priority: CLI flag > `SIGIL_ML_MODE` env var > default `local`.
+- Refactor `create_app()` to accept a `mode` parameter and store it on `AppState`.
+- In cloud mode, skip SQLite schema bootstrap (`ensure_ml_tables`), `EventPoller`, and `TrainingScheduler` at startup.
+- In local mode, behavior is 100% identical to current implementation (zero regression).
+- Module-level `app = create_app()` continues to work for `uvicorn sigil_ml.app:app`.
+- Add empty `[cloud]` optional extras group to `pyproject.toml` for future dependencies.
 
-**Success gate**: `sigil-ml serve --mode cloud` starts without opening SQLite, without starting a poller, and responds on its configured port. `sigil-ml serve` (default) still starts poller + SQLite as before.
+**Measurable**:
+- `sigil-ml serve --mode cloud` starts without opening any SQLite connection.
+- `sigil-ml serve` (no flag) starts poller and scheduler as before.
+- `SIGIL_ML_MODE=cloud sigil-ml serve` behaves the same as `--mode cloud`.
+- Existing test suite (`pytest tests/test_server.py`) passes without modification.
 
 ## Context & Constraints
 
-- **Spec**: `kitty-specs/001-cloud-serving-mode/spec.md` -- FR-001, FR-002, FR-006, FR-008.
-- **CLAUDE.md invariant**: No heavyweight dependencies beyond `scikit-learn`, `numpy`, `fastapi`, `uvicorn`, `joblib`.
-- **Current architecture**: `app.py` has a single `create_app()` that unconditionally bootstraps SQLite schema, loads models from local disk, starts the EventPoller, and starts a TrainingScheduler loop.
-- **Backward compatibility**: The line `app = create_app()` at module level is used by `uvicorn sigil_ml.app:app`. It MUST default to local mode.
+- **Spec**: `kitty-specs/001-cloud-serving-mode/spec.md` -- FR-001, FR-002, FR-006, FR-008
+- **Plan**: `kitty-specs/001-cloud-serving-mode/plan.md` -- Design Decisions D1 (ServingMode enum), D2 (mode resolution order), D7 (create_app factory changes), D8 (pyproject.toml changes)
+- **Data Model**: `kitty-specs/001-cloud-serving-mode/data-model.md` -- ServingMode entity
+- **Research**: `kitty-specs/001-cloud-serving-mode/research.md` -- R1 (branching strategy), R5 (conditional startup)
+
+**Current architecture** (files you will modify):
+- `src/sigil_ml/config.py` (26 lines): Contains `db_path()`, `models_dir()`, `weights_path()`, `sigild_plugin_url()`. No enum exists yet.
+- `src/sigil_ml/cli.py` (63 lines): `serve` subcommand has `--host` and `--port` args. No `--mode` arg.
+- `src/sigil_ml/app.py` (106 lines): `create_app()` takes no parameters. `AppState` has no `mode` attribute. Startup unconditionally calls `ensure_ml_tables()`, creates `EventPoller`, creates `TrainingScheduler`.
+- `pyproject.toml`: Has `[project.optional-dependencies]` with only `dev` group.
+
+**Backward compatibility constraint**: `app = create_app()` at module level (line 105 of `app.py`) is used by `uvicorn sigil_ml.app:app`. It MUST default to local mode.
+
+**Implementation command**: `spec-kitty implement WP01`
 
 ## Subtasks & Detailed Guidance
 
-### Subtask T001 -- Create `ServingMode` enum in `src/sigil_ml/config.py`
+### Subtask T001 -- Create `ServingMode` str enum in `src/sigil_ml/config.py`
 
-- **Purpose**: Provide a single source of truth for the operating mode that all modules can import.
+- **Purpose**: Provide a type-safe, JSON-serializable enum that all downstream code uses to branch behavior.
 - **Steps**:
-  1. Add an `enum.Enum` (or `str` enum for JSON-friendliness) to `src/sigil_ml/config.py`:
+  1. Add `import enum` at the top of `src/sigil_ml/config.py` (after the existing `import os`).
+  2. Define the enum class near the top of the module, before the path helper functions:
      ```python
-     import enum
-
      class ServingMode(str, enum.Enum):
+         """Operating mode for the sigil-ml service.
+
+         LOCAL: Default. Poller, SQLite, local models. Current behavior.
+         CLOUD: Stateless. No poller, no SQLite, tenant-aware model loading.
+         """
          LOCAL = "local"
          CLOUD = "cloud"
      ```
-  2. Add a module-level function to resolve the active mode:
-     ```python
-     def serving_mode(override: str | None = None) -> ServingMode:
-         """Resolve the active serving mode.
+  3. The `str` mixin ensures `ServingMode.CLOUD == "cloud"` evaluates to `True` and `json.dumps(ServingMode.CLOUD)` produces `"cloud"`.
+- **Files**: `src/sigil_ml/config.py` (modify -- add ~10 lines)
+- **Parallel?**: No -- foundational for all other subtasks.
+- **Notes**: Keep placement near the top, before `_data_home()`. The existing functions (`db_path`, `models_dir`, etc.) remain unchanged.
 
-         Priority: explicit override > env var > default (local).
+### Subtask T002 -- Add mode resolution helper in `src/sigil_ml/config.py`
+
+- **Purpose**: Centralize the priority chain: CLI flag > `SIGIL_ML_MODE` env var > default `local`. This single function is the only place mode resolution logic lives.
+- **Steps**:
+  1. Add the following function after the `ServingMode` enum definition:
+     ```python
+     def resolve_mode(cli_mode: str | None = None) -> ServingMode:
+         """Resolve the serving mode from CLI flag or environment.
+
+         Priority:
+           1. cli_mode argument (from --mode flag)
+           2. SIGIL_ML_MODE environment variable
+           3. Default: LOCAL
+
+         Raises:
+             SystemExit: If the provided mode value is invalid.
          """
-         raw = override or os.environ.get("SIGIL_ML_MODE", "local")
+         raw = cli_mode or os.environ.get("SIGIL_ML_MODE", "local")
          try:
              return ServingMode(raw.lower())
          except ValueError:
-             raise SystemExit(f"Invalid serving mode: {raw!r}. Must be 'local' or 'cloud'.")
+             raise SystemExit(
+                 f"Invalid serving mode: {raw!r}. Must be 'local' or 'cloud'."
+             )
      ```
-  3. Keep the existing `db_path()`, `models_dir()`, `weights_path()`, and `sigild_plugin_url()` functions unchanged.
-- **Files**: `src/sigil_ml/config.py`
-- **Parallel?**: No -- downstream subtasks depend on this.
-- **Notes**: Using `str, enum.Enum` ensures the value serializes cleanly to JSON (for health endpoints later). The `serving_mode()` function consolidates override logic so callers don't have to.
+  2. Handle the edge case where `cli_mode` is an empty string by treating it as `None`.
+- **Files**: `src/sigil_ml/config.py` (modify -- add ~15 lines)
+- **Parallel?**: No -- depends on T001, used by T003.
+- **Notes**: The CLI will call `resolve_mode(args.mode)`. The `create_app()` function will call `resolve_mode()` with no argument to pick up env var.
 
-### Subtask T002 -- Add `--mode` argument to the `serve` subcommand in `src/sigil_ml/cli.py`
+### Subtask T003 -- Add `--mode` argument to `serve` subcommand in `src/sigil_ml/cli.py`
 
-- **Purpose**: Let operators choose the serving mode from the CLI.
+- **Purpose**: Allow operators to select cloud mode from the command line.
 - **Steps**:
-  1. In `cli.py`, add a `--mode` argument to the `serve` subparser:
+  1. Add the argument to `serve_parser` (after the existing `--port` argument, line 19):
      ```python
      serve_parser.add_argument(
          "--mode",
          choices=["local", "cloud"],
          default=None,
-         help="Serving mode: 'local' (default, with poller) or 'cloud' (stateless K8s)",
+         help="Serving mode: 'local' (default, with poller) or 'cloud' (stateless, no SQLite)",
      )
      ```
-  2. When `args.command == "serve"`, resolve the mode and pass it to the app:
-     ```python
-     from sigil_ml.config import serving_mode
-
-     mode = serving_mode(args.mode)
-     ```
-  3. Store the resolved mode in an environment variable so that `create_app()` (invoked by uvicorn in a separate import) can pick it up:
+  2. In the `if args.command == "serve":` block (line 28), resolve the mode and set an env var bridge:
      ```python
      import os
-     os.environ["_SIGIL_ML_MODE_OVERRIDE"] = mode.value
+     from sigil_ml.config import resolve_mode
+
+     mode = resolve_mode(args.mode)
+     # Bridge mode to create_app() via env var (uvicorn string import cannot pass args)
+     os.environ["SIGIL_ML_MODE"] = mode.value
+     uvicorn.run(
+         "sigil_ml.app:app",
+         host=args.host,
+         port=args.port,
+         log_level="info",
+     )
      ```
-  4. Then call `uvicorn.run(...)` as before.
-- **Files**: `src/sigil_ml/cli.py`
-- **Parallel?**: No -- depends on T001.
-- **Notes**: We use an env var bridge because uvicorn imports `sigil_ml.app:app` as a fresh module; we cannot pass arguments directly. The env var `_SIGIL_ML_MODE_OVERRIDE` is internal (underscored) to avoid collision with the public `SIGIL_ML_MODE`.
+  3. Add `import os` to the top of `cli.py`.
+- **Files**: `src/sigil_ml/cli.py` (modify -- add ~10 lines)
+- **Parallel?**: No -- depends on T001 and T002.
+- **Notes**: The env var bridge is needed because `uvicorn.run("sigil_ml.app:app")` imports the module and evaluates `app = create_app()`. The `create_app()` function reads `SIGIL_ML_MODE` from the environment via `resolve_mode()`. An alternative is `uvicorn.run("sigil_ml.app:create_app", factory=True)` but that changes the import path convention.
 
-### Subtask T003 -- Thread `ServingMode` into `create_app()` via a factory parameter in `src/sigil_ml/app.py`
+### Subtask T004 -- Refactor `create_app()` to accept `mode` parameter, store on `AppState`
 
-- **Purpose**: Make `create_app()` mode-aware so it can conditionally initialize components.
+- **Purpose**: Thread the serving mode into the application so routes and startup can branch on it.
 - **Steps**:
-  1. Update the `create_app` signature:
+  1. Add `mode` attribute to `AppState.__init__()`:
      ```python
-     from sigil_ml.config import ServingMode, serving_mode
+     from sigil_ml.config import ServingMode, resolve_mode
 
-     def create_app(mode: ServingMode | None = None) -> FastAPI:
-         if mode is None:
-             # Check for CLI bridge env var, then fall back to SIGIL_ML_MODE, then default
-             override = os.environ.pop("_SIGIL_ML_MODE_OVERRIDE", None)
-             mode = serving_mode(override)
-         ...
-     ```
-  2. Store the mode on `AppState`:
-     ```python
      class AppState:
+         """Holds model instances and runtime state, passed to routes."""
+
          def __init__(self, mode: ServingMode = ServingMode.LOCAL) -> None:
              self.mode = mode
-             # ... existing fields ...
+             self.stuck: StuckPredictor | None = None
+             self.activity: ActivityClassifier | None = None
+             self.workflow: WorkflowStatePredictor | None = None
+             self.duration: DurationEstimator | None = None
+             self.quality: QualityEstimator | None = None
+             self.poller: EventPoller | None = None
+             self.training_in_progress: bool = False
+             # Cloud-mode fields (initialized by WP05, None for now)
+             self.model_cache = None
+             self.model_loader = None
      ```
-  3. Pass mode into `AppState`:
+  2. Update `create_app()` to accept and resolve mode:
      ```python
-     state = AppState(mode=mode)
+     def create_app(mode: ServingMode | None = None) -> FastAPI:
+         """Create and configure the FastAPI application."""
+         if mode is None:
+             mode = resolve_mode()  # reads SIGIL_ML_MODE env var, defaults to LOCAL
+         application = FastAPI(title="sigil-ml", version="0.1.0")
+         state = AppState(mode=mode)
+
+         register_routes(application, state)
+         # ... startup/shutdown events ...
      ```
-  4. The module-level `app = create_app()` continues to work -- it will resolve to local mode by default.
-- **Files**: `src/sigil_ml/app.py`
-- **Parallel?**: No -- T004 depends on this.
-- **Notes**: Using `os.environ.pop()` cleans up the bridge var after reading it, preventing leakage.
+  3. The module-level `app = create_app()` (line 105) now calls `resolve_mode()` which defaults to LOCAL unless `SIGIL_ML_MODE` is set. No change to this line.
+- **Files**: `src/sigil_ml/app.py` (modify -- change ~10 lines)
+- **Parallel?**: No -- T005 depends on this.
+- **Notes**: Keep `load_models()` and `reload_models_into_poller()` methods on `AppState` unchanged. They are only called in local mode (guarded by T005). The `model_cache` and `model_loader` fields are `None` placeholders for WP05.
 
-### Subtask T004 -- Conditional startup: skip SQLite, poller, and training scheduler in cloud mode
+### Subtask T005 -- Conditional startup: skip SQLite, EventPoller, and TrainingScheduler in cloud mode
 
-- **Purpose**: In cloud mode, the service must start without local dependencies. FR-002 mandates no SQLite connections; FR-008 mandates no writes to SQLite tables.
+- **Purpose**: In cloud mode, the startup event must NOT touch SQLite, create a poller, or schedule training. This is the core safety gate (FR-002, FR-008).
 - **Steps**:
-  1. In the `startup_event()` inside `create_app()`, wrap the SQLite + poller + scheduler block in a mode check:
+  1. Modify the `startup_event()` closure inside `create_app()` to branch on `state.mode`:
      ```python
      @application.on_event("startup")
      async def startup_event() -> None:
          if state.mode == ServingMode.LOCAL:
              db = config.db_path()
+
              try:
                  ensure_ml_tables(db)
              except Exception:
-                 logger.warning("schema bootstrap failed", exc_info=True)
+                 logger.warning(
+                     "schema bootstrap failed (sigild may not have started yet)",
+                     exc_info=True,
+                 )
 
              state.load_models()
 
              state.poller = EventPoller(
                  db_path=db,
-                 models={ ... },
+                 models={
+                     "stuck": state.stuck,
+                     "activity": state.activity,
+                     "workflow": state.workflow,
+                     "duration": state.duration,
+                     "quality": state.quality,
+                 },
              )
              asyncio.create_task(state.poller.run())
 
-             scheduler = TrainingScheduler(db, reload_callback=state.reload_models_into_poller)
-             asyncio.create_task(_schedule_loop(scheduler))
+             scheduler = TrainingScheduler(
+                 db, reload_callback=state.reload_models_into_poller
+             )
 
-             logger.info("sigil-ml: local mode — models loaded, poller started, scheduler active")
+             async def _schedule_loop():
+                 while True:
+                     await asyncio.get_event_loop().run_in_executor(
+                         None, scheduler.check_and_retrain
+                     )
+                     await asyncio.sleep(600)
+
+             asyncio.create_task(_schedule_loop())
+
+             logger.info(
+                 "sigil-ml: local mode -- models loaded, poller started, scheduler active"
+             )
          else:
-             # Cloud mode: no SQLite, no poller, no scheduler
-             # Models will be loaded on-demand per tenant (WP05)
-             logger.info("sigil-ml: cloud mode — stateless serving, no poller")
+             # Cloud mode: no SQLite, no poller, no scheduler.
+             # Models loaded lazily per-tenant (WP05 will add cache/loader init here).
+             logger.info("sigil-ml: cloud mode -- stateless serving, no poller")
      ```
-  2. Update `shutdown_event()` similarly:
-     ```python
-     @application.on_event("shutdown")
-     async def shutdown_event() -> None:
-         if state.poller:
-             state.poller.stop()
-             logger.info("poller stopped")
-     ```
-     (This already handles cloud mode since `state.poller` will be `None`.)
-  3. In cloud mode, `state.load_models()` is NOT called at startup. Models are loaded on-demand per tenant in WP05. For now (before WP05), cloud mode will serve fallback/rule-based predictions for all endpoints.
-- **Files**: `src/sigil_ml/app.py`
-- **Parallel?**: Yes (independent of T005 once T003 is done).
-- **Notes**: After this subtask, cloud mode starts but all predict endpoints will return fallback responses (models are None). This is correct -- WP05 adds tenant-aware model loading.
+  2. The `shutdown_event()` already guards with `if state.poller:` so it handles cloud mode (poller is `None`) correctly. No change needed.
+  3. Verify that NO call to `config.db_path()`, `ensure_ml_tables()`, `EventPoller()`, `TrainingScheduler()`, or `state.load_models()` happens in the cloud startup path.
+- **Files**: `src/sigil_ml/app.py` (modify -- restructure startup_event)
+- **Parallel?**: Yes -- can proceed once T004 is merged.
+- **Notes**: After this subtask, cloud mode starts but all predict endpoints return fallback responses (models are `None`). This is correct and expected -- WP02 adds endpoint guards, WP05 adds tenant-aware model loading. The critical invariant is: **no SQLite file is touched in cloud mode**.
 
-### Subtask T005 -- Add environment variable override `SIGIL_ML_MODE`
+### Subtask T006 -- Add `[cloud]` optional extras group to `pyproject.toml`
 
-- **Purpose**: Allow operators to set the mode via environment variable (useful in Kubernetes ConfigMaps/Secrets) without requiring CLI flags.
+- **Purpose**: Reserve an installation extra for future cloud-specific dependencies (boto3 for Feature 003, etc.).
 - **Steps**:
-  1. This is already handled in T001's `serving_mode()` function which reads `SIGIL_ML_MODE`.
-  2. Verify the priority chain works: `--mode` flag > `SIGIL_ML_MODE` env var > default `"local"`.
-  3. Document the env var in a docstring or comment near `serving_mode()`.
-  4. Add a brief log line at startup showing the resolved mode and its source:
-     ```python
-     logger.info("sigil-ml: resolved mode=%s (source=%s)", mode.value, source)
+  1. Add to `pyproject.toml` under `[project.optional-dependencies]` (after the existing `dev` group):
+     ```toml
+     [project.optional-dependencies]
+     dev = ["pytest>=8.0", "httpx>=0.27", "ruff>=0.4", "pyre-check>=0.9.18"]
+     cloud = []  # Reserved for future: boto3, asyncpg, etc.
      ```
-     where source is `"cli"`, `"env"`, or `"default"`.
-- **Files**: `src/sigil_ml/config.py`, `src/sigil_ml/app.py`
-- **Parallel?**: Yes (independent of T004).
-- **Notes**: The `serving_mode()` function from T001 already reads the env var. This subtask is about ensuring the priority chain is correct and observable.
+  2. No actual dependencies added. This enables `pip install sigil-ml[cloud]` in the future.
+- **Files**: `pyproject.toml` (modify -- add 1 line)
+- **Parallel?**: Yes -- completely independent of all other subtasks.
 
 ## Risks & Mitigations
 
-- **Breaking `uvicorn sigil_ml.app:app`**: The module-level `app = create_app()` must default to local mode. Mitigated by making `mode` parameter optional with local default.
-- **Env var collision**: `_SIGIL_ML_MODE_OVERRIDE` is internal (underscored prefix). `SIGIL_ML_MODE` is the public env var.
-- **Cloud mode with no models**: After WP01, cloud mode starts but all endpoints return fallback responses. This is intentional -- WP02 makes endpoints stateless, WP05 adds model loading.
+| Risk | Probability | Impact | Mitigation |
+|------|-------------|--------|------------|
+| Breaking `uvicorn sigil_ml.app:app` import | Low | High | `create_app()` defaults to LOCAL when no arg/env var. Module-level `app = create_app()` unchanged. |
+| `SIGIL_ML_MODE` env var set unexpectedly | Low | Medium | `resolve_mode()` validates the value and raises `SystemExit` for invalid inputs. |
+| Cloud mode starts with no models | Expected | None | Endpoints return fallback responses. WP05 adds model loading. |
+| Import-time side effects | Low | Medium | `config.db_path()` is only called inside `startup_event()`, not at import time. |
 
 ## Review Guidance
 
-- Verify `sigil-ml serve` (no flags) still starts poller + SQLite as before.
-- Verify `sigil-ml serve --mode cloud` starts without any SQLite operations in logs.
-- Verify `SIGIL_ML_MODE=cloud sigil-ml serve` works the same as `--mode cloud`.
-- Verify `app = create_app()` at module level defaults to local mode.
-- Check that no SQLite imports are executed at module scope (they should only be in functions guarded by mode checks).
+- Verify `create_app()` with no arguments defaults to LOCAL mode.
+- Verify `app = create_app()` at module level still works (the uvicorn import path).
+- Verify in cloud mode: NO `sqlite3` operations, NO `db_path()` calls, NO background tasks created.
+- Run `pytest tests/test_server.py` -- all existing tests must pass unchanged.
+- Check `ServingMode` serialization: `ServingMode.CLOUD.value == "cloud"` and `str(ServingMode.CLOUD)` produces a usable string.
+- Check mode resolution priority: `resolve_mode("cloud")` > `SIGIL_ML_MODE=cloud` > default `local`.
 
 ## Activity Log
 
-- 2026-03-29T16:29:58Z -- system -- lane=planned -- Prompt created.
+- 2026-03-30T01:45:14Z -- system -- lane=planned -- Prompt regenerated.
