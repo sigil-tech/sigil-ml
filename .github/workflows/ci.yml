@@ -26,6 +26,55 @@ jobs:
       - name: Check formatting
         run: ruff format --check src/ tests/
 
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Pyre type check
+        run: pyre check 2>&1 | tee pyre-output.txt; echo "Pyre exited with $?"
+
+      - name: Fail on real type errors (exclude Pydantic false positives)
+        run: |
+          # Filter out known false positives from Pydantic BaseModel and numpy stubs.
+          grep -E "^src/" pyre-output.txt \
+            | grep -v "Uninitialized attribute" \
+            | grep -v "Unexpected keyword" \
+            | grep -v "Undefined import.*numpy" \
+            | grep -v "Undefined or invalid type.*ndarray" \
+            | grep -v "Undefined or invalid type.*FastAPI" \
+            | grep -v "Undefined or invalid type.*BackgroundTasks" \
+            > pyre-errors.txt || true
+
+          if [ -s pyre-errors.txt ]; then
+            echo "::error::Pyre found real type errors:"
+            cat pyre-errors.txt
+            exit 1
+          else
+            echo "Pyre: no actionable errors (Pydantic/numpy false positives filtered)"
+          fi
+
+      - name: Pysa security analysis
+        run: pyre analyze 2>&1 | tee pysa-output.txt; echo "Pysa exited with $?"
+
+      - name: Report Pysa findings
+        if: always()
+        run: |
+          if grep -q "Found [1-9]" pysa-output.txt 2>/dev/null; then
+            echo "::warning::Pysa found potential security issues — review pysa-output.txt"
+            grep -A2 "Issue" pysa-output.txt || true
+          else
+            echo "Pysa: no security issues found"
+          fi
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:

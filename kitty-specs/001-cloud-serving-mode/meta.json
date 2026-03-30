@@ -2,10 +2,8 @@
   "feature_number": "001",
   "slug": "001-cloud-serving-mode",
   "feature_slug": "001-cloud-serving-mode",
-  "friendly_name": "Cloud Serving Mode",
+  "friendly_name": "cloud serving mode",
   "mission": "software-dev",
-  "source_description": "Add a stateless cloud serving mode to sigil-ml so paid users can run ML predictions in K8s without Python on their laptop",
   "target_branch": "main",
-  "created_at": "2026-03-25T16:15:28.728007+00:00",
-  "vcs": "git"
+  "created_at": "2026-03-25T16:15:28.728007+00:00"
 }

@@ -1,7 +1,7 @@
 # Work Packages: Cloud Training Pipeline
 
 **Inputs**: Design documents from `/kitty-specs/004-cloud-training-pipeline/`
-**Prerequisites**: plan.md (tech architecture, stack), spec.md (user stories & requirements)
+**Prerequisites**: spec.md (user stories & requirements)
 
 **Tests**: Only include explicit testing work when stakeholders request it.
 
@@ -13,24 +13,23 @@
 
 ## Work Package WP01: Cloud Training Entrypoint & CLI (Priority: P0)
 
-**Goal**: Add `--mode cloud` and `--tenant` / `--all-tenants` / `--aggregate` flags to the `sigil-ml train` CLI command. Create the `CloudTrainer` skeleton class that accepts `DataStore` and `ModelStore` protocols. Create the `TrainingRun` and `TrainingSummary` dataclasses for structured output. Wire the single-tenant CLI path end-to-end. Ensure local training is completely unchanged.
-**Independent Test**: Run `sigil-ml train --mode cloud --tenant test-tenant-1` against a mocked DataStore with synthetic data. Verify the command completes, invokes the trainer, and produces structured output. Run `sigil-ml train` (local) and verify identical behavior to before.
+**Goal**: Add `--mode cloud` and `--tenant` / `--all-tenants` / `--aggregate` flags to the `sigil-ml train` CLI command. Wire up a new `CloudTrainer` class that accepts a `DataStore` and `ModelStore` and orchestrates per-tenant training. This is the backbone all subsequent WPs depend on.
+**Independent Test**: Run `sigil-ml train --mode cloud --tenant test-tenant-1` against a mocked DataStore with synthetic data. Verify the command completes, invokes the trainer, and produces structured output.
 **Prompt**: `/tasks/WP01-cloud-training-entrypoint.md`
 **Estimated Prompt Size**: ~450 lines
 
 ### Included Subtasks
-- [ ] T001 Extend `cli.py` to accept `--mode` (local|cloud), `--tenant <id>`, `--all-tenants`, and `--aggregate` flags on the `train` subcommand with mutual-exclusivity validation
-- [ ] T002 Create `src/sigil_ml/training/cloud_trainer.py` with `CloudTrainer` class skeleton that accepts `DataStore` and `ModelStore` protocol objects
-- [ ] T003 Implement `CloudTrainer.train_tenant(tenant_id: str) -> TrainingRun` — single-tenant training flow: create tenant-scoped stores, invoke model training, capture results
-- [ ] T004 [P] Create `src/sigil_ml/training/models.py` with dataclasses `TrainingRun`, `TrainingBatch`, `TrainingSummary`, and `CloudTrainingConfig`
-- [ ] T005 Wire CLI `--mode cloud --tenant <id>` to construct stores from config, instantiate `CloudTrainer`, invoke `train_tenant()`, and print structured JSON summary
-- [ ] T006 Ensure `sigil-ml train` (no flags / `--mode local`) continues to use existing `Trainer` class with `db_path` unchanged — zero modifications to local path
+- [ ] T001 Extend `cli.py` to accept `--mode` (local|cloud), `--tenant <id>`, `--all-tenants`, and `--aggregate` flags on the `train` subcommand
+- [ ] T002 Create `src/sigil_ml/training/cloud_trainer.py` with `CloudTrainer` class that accepts `DataStore` and `ModelStore` interfaces
+- [ ] T003 Implement `CloudTrainer.train_tenant(tenant_id)` — single-tenant training flow using DataStore for data and ModelStore for weights
+- [ ] T004 [P] Create `src/sigil_ml/training/models.py` with dataclasses `TrainingRun`, `TrainingSummary` for structured training output
+- [ ] T005 Wire CLI `--mode cloud --tenant <id>` to invoke `CloudTrainer.train_tenant()` and print structured summary
+- [ ] T006 Ensure `sigil-ml train` (no flags / `--mode local`) continues to use existing `Trainer` class unchanged
 
 ### Implementation Notes
-- `CloudTrainer` depends on the `DataStore` protocol (feature 002) and `ModelStore` protocol (feature 003). Accept these as constructor dependencies, never import concrete implementations.
-- The existing `Trainer` class reads directly from SQLite via `db_path` and saves via `config.weights_path()`. The local path must remain completely untouched (FR-011).
-- CLI validation: `--tenant`, `--all-tenants`, and `--aggregate` are mutually exclusive. `--mode cloud` requires at least one of them.
-- Cloud mode validates that `SIGIL_ML_DB_URL` and `SIGIL_ML_S3_BUCKET` environment variables are set before proceeding.
+- `CloudTrainer` depends on the `DataStore` protocol (feature 002) and `ModelStore` protocol (feature 003). It must accept these as constructor dependencies, not import concrete implementations.
+- The existing `Trainer` class reads directly from SQLite and saves to local disk. `CloudTrainer` replaces these with the abstract interfaces but reuses the same model training logic (same `StuckPredictor.train()`, `DurationEstimator.train()`, etc.).
+- The `--mode local` path must remain completely untouched to satisfy FR-011.
 
 ### Parallel Opportunities
 - T004 (dataclasses) can proceed in parallel with T002/T003 since it only defines data structures.
@@ -40,7 +39,7 @@
 
 ### Risks & Mitigations
 - Features 002/003 not yet implemented: Use Protocol-typed stubs that match the expected interface. Implementation validates against stubs; real backends are wired later.
-- CLI flag conflicts: Validate mutual exclusivity early with clear error messages.
+- CLI flag conflicts: Validate mutual exclusivity (`--tenant` and `--all-tenants` cannot be used together).
 
 **Requirements Refs**: FR-001, FR-004, FR-011, FR-012
 
@@ -48,31 +47,30 @@
 
 ## Work Package WP02: Per-Tenant Training Logic (Priority: P0)
 
-**Goal**: Implement the core per-tenant training pipeline inside `CloudTrainer.train_tenant()`: data threshold checks, minimum interval enforcement, training all 5 model types (stuck, duration, activity, workflow, quality), cold-start synthetic fallback, and audit event recording.
-**Independent Test**: Call `CloudTrainer.train_tenant("tenant-A")` with a DataStore containing 15 completed tasks. Verify all 5 models are trained and a `TrainingRun` result is returned with correct sample counts, status, and models_trained list. Call with fewer than 10 tasks and verify synthetic fallback is used.
+**Goal**: Implement the core per-tenant training pipeline: data threshold checks, minimum interval enforcement, training all 5 model types, and cold-start synthetic fallback. This is the heart of the cloud training system.
+**Independent Test**: Call `CloudTrainer.train_tenant("tenant-A")` with a DataStore containing 15 completed tasks. Verify all 5 models are trained and a `TrainingRun` result is returned with correct sample counts and status.
 **Prompt**: `/tasks/WP02-per-tenant-training-logic.md`
 **Estimated Prompt Size**: ~500 lines
 
 ### Included Subtasks
-- [ ] T007 Implement data threshold check: query completed tasks via DataStore, gate on configurable minimum (default 10) completed tasks for ML training (FR-005)
-- [ ] T008 Implement cold-start fallback: when below threshold, train using synthetic data generators — reuse `generate_stuck_data`, `generate_duration_data`; create new generators for activity, workflow, and quality models
-- [ ] T009 Implement minimum-interval enforcement: check last training timestamp from `ml_training_runs` table, skip tenant if trained within configurable interval (default 1 hour) (FR-006)
-- [ ] T010 Implement feature extraction from DataStore: create cloud-compatible versions of `extract_stuck_features` and `extract_duration_features` that accept DataStore queries instead of raw SQLite path; add extraction functions for activity, workflow, and quality features
+- [ ] T007 Implement data threshold check: query completed tasks via DataStore, gate on minimum 10 completed tasks for ML training (FR-005)
+- [ ] T008 Implement cold-start fallback: when below threshold, train using synthetic data generators (reuse `generate_stuck_data`, `generate_duration_data`; add generators for activity, workflow, quality)
+- [ ] T009 Implement minimum-interval enforcement: check last training timestamp via DataStore, skip tenant if trained within configurable interval (default 1 hour) (FR-006)
+- [ ] T010 Implement feature extraction from DataStore: adapt `extract_stuck_features` and `extract_duration_features` to accept DataStore queries instead of raw SQLite path
 - [ ] T011 Train all 5 model types (stuck, duration, activity, workflow, quality) per tenant, saving weights via ModelStore with tenant-scoped prefix
-- [ ] T012 Record training events to `ml_training_runs` table and audit log via DataStore for each tenant processed (FR-009)
+- [ ] T012 Record training events to audit log via DataStore for each tenant processed (FR-009)
 
 ### Implementation Notes
-- Feature extraction currently takes a `db_path` and opens SQLite directly. Create parallel cloud-compatible extraction functions that accept a DataStore (or raw data dicts). Do NOT modify the existing extraction functions — the local path must remain untouched.
-- The existing `Trainer._train_stuck()` and `Trainer._train_duration()` contain combined query+train logic. Factor out the core "given X,y arrays, train and save" logic into reusable functions that `CloudTrainer` can call with different data sources.
-- Synthetic data generators exist for stuck and duration. Activity, workflow, and quality models need new generators or a cold-start strategy (quality is rule-based, activity/workflow can use random category distributions).
-- The `ml_training_runs` table (see plan.md D6) tracks per-tenant training history and is Python-owned, created on first use.
+- Feature extraction currently takes a `db_path` and opens SQLite directly. The cloud path needs equivalent extraction using DataStore methods. Two approaches: (a) create parallel extraction functions that take a DataStore, or (b) have CloudTrainer query raw data via DataStore and feed it to existing extraction logic. Approach (a) is cleaner.
+- The existing `Trainer._train_stuck()` and `Trainer._train_duration()` contain the training logic. Factor the core "given X,y arrays, train and save" logic into reusable functions that both local and cloud trainers call.
+- Synthetic data generators exist for stuck and duration. Activity, workflow, and quality models need generators or a similar cold-start strategy.
 
 ### Parallel Opportunities
 - T007 (threshold check) and T009 (interval check) are independent checks.
 - T008 (cold-start) and T010 (feature extraction) touch different code paths.
 
 ### Dependencies
-- Depends on WP01 (CloudTrainer skeleton and TrainingRun dataclass must exist).
+- Depends on WP01 (CloudTrainer skeleton and TrainingRun dataclass).
 
 ### Risks & Mitigations
 - Feature extraction refactor could break local training: Keep original functions intact, add new DataStore-backed versions alongside them.
@@ -84,29 +82,28 @@
 
 ## Work Package WP03: Batch Training & Tenant Discovery (Priority: P1)
 
-**Goal**: Implement `CloudTrainer.train_all_tenants()` — the batch entrypoint that discovers all eligible tenants, trains each sequentially with fault isolation, and produces a `TrainingBatch` summary report. Wire the `--all-tenants` CLI path.
-**Independent Test**: Create 5 mock tenants via DataStore (3 eligible, 1 recently trained, 1 with insufficient data). Run batch training. Verify 3 are trained, 1 is skipped (interval), 1 uses synthetic data, and the summary report is accurate with trained/skipped/failed counts.
+**Goal**: Implement `CloudTrainer.train_all_tenants()` — the batch entrypoint that discovers all eligible tenants, trains each sequentially, handles per-tenant failures gracefully, and produces a `TrainingSummary` report. This is the CronJob-facing interface.
+**Independent Test**: Create 5 mock tenants via DataStore (3 eligible, 1 recently trained, 1 with insufficient data). Run batch training. Verify 3 are trained, 1 is skipped (interval), 1 uses synthetic data, and the summary report is accurate.
 **Prompt**: `/tasks/WP03-batch-training-tenant-discovery.md`
 **Estimated Prompt Size**: ~400 lines
 
 ### Included Subtasks
-- [ ] T013 Implement `discover_eligible_tenants()` in `src/sigil_ml/training/tenant_discovery.py`: query DataStore for all distinct tenant IDs with synced data, filtering by minimum data threshold and last training time
-- [ ] T014 Implement `CloudTrainer.train_all_tenants() -> TrainingBatch`: iterate discovered tenants, call `train_tenant()` for each, collect `TrainingRun` results into a `TrainingBatch`
-- [ ] T015 Implement fault isolation: wrap each tenant's training in try/except, log failures with error details, mark as failed in TrainingRun, continue with remaining tenants (FR-007)
-- [ ] T016 Wire CLI `--mode cloud --all-tenants` to invoke `train_all_tenants()` and print structured JSON summary with per-tenant status and aggregate counts
-- [ ] T017 [P] Extend `TrainingBatch` dataclass with computed properties: `.trained`, `.skipped`, `.failed` counts, and `to_json()` serialization method
+- [ ] T013 Implement tenant discovery: query DataStore for all tenant IDs with synced data
+- [ ] T014 Implement `CloudTrainer.train_all_tenants()` that iterates discovered tenants, calling `train_tenant()` for each, collecting `TrainingRun` results into a `TrainingBatch`
+- [ ] T015 Implement fault isolation: wrap each tenant's training in try/except, log failures, continue with remaining tenants (FR-007)
+- [ ] T016 Wire CLI `--mode cloud --all-tenants` to invoke batch training and print structured summary
+- [ ] T017 [P] Create `TrainingBatch` dataclass that aggregates `TrainingRun` results with trained/skipped/failed counts and per-tenant details
 
 ### Implementation Notes
-- Tenant discovery depends on the DataStore having a method like `list_tenants()` or equivalent. If the DataStore protocol from feature 002 does not include this, add it as part of this WP and document the protocol extension.
+- Tenant discovery depends on the DataStore having a method like `list_tenants()` or equivalent. If the DataStore protocol from feature 002 doesn't include this, add it as part of this WP and note the dependency.
 - The batch loop must be sequential (not parallel) for simplicity and resource safety. Future optimization can parallelize with worker pools.
-- The "nothing to train" case (all tenants skipped) must complete successfully with a clean summary — it must not raise an error.
-- The summary must satisfy FR-008: structured, parseable output with per-tenant details.
+- The "nothing to train" case (all tenants skipped) must complete successfully with a clean summary, not raise an error.
 
 ### Parallel Opportunities
-- T017 (TrainingBatch dataclass extension) can proceed in parallel with T013/T014.
+- T017 (TrainingBatch dataclass) can proceed in parallel with T013/T014.
 
 ### Dependencies
-- Depends on WP02 (per-tenant training logic — `train_tenant()` must exist and be functional).
+- Depends on WP02 (per-tenant training logic — `train_tenant()` must exist).
 
 ### Risks & Mitigations
 - One tenant's training corrupting shared state: Each `train_tenant()` call must be fully isolated — no shared mutable state between tenants.
@@ -118,33 +115,32 @@
 
 ## Work Package WP04: Concurrent Training Lock (Priority: P1)
 
-**Goal**: Prevent concurrent training for the same tenant when multiple CronJob pods overlap. Implement a `TrainingLock` protocol with a DataStore-backed implementation using database-level atomicity. Include stale lock detection to recover from crashed processes.
-**Independent Test**: Simulate two concurrent `train_tenant("A")` calls. Verify the second call returns a "skipped_locked" status while the first completes normally. Verify stale locks (older than 2 hours) are automatically overridden.
+**Goal**: Implement locking to prevent concurrent training for the same tenant. When a training job is already running for a tenant, subsequent attempts should skip that tenant rather than running in parallel.
+**Independent Test**: Simulate two concurrent `train_tenant("A")` calls. Verify the second call returns a "skipped (locked)" status while the first completes normally.
 **Prompt**: `/tasks/WP04-concurrent-training-lock.md`
-**Estimated Prompt Size**: ~350 lines
+**Estimated Prompt Size**: ~300 lines
 
 ### Included Subtasks
-- [ ] T018 Design and implement a `TrainingLock` protocol in `src/sigil_ml/training/locking.py` with `acquire(tenant_id) -> bool` and `release(tenant_id)` methods
-- [ ] T019 Implement `DataStoreTrainingLock` that uses the DataStore to record/check lock state via an `ml_training_locks` table with `tenant_id`, `acquired_at`, and `pid` columns
-- [ ] T020 Integrate lock acquisition at the start of `CloudTrainer.train_tenant()` and release in a `finally` block; if lock cannot be acquired, return a `TrainingRun` with status `"skipped_locked"`
-- [ ] T021 [P] Add `"skipped_locked"` status to `TrainingRun` and update `TrainingBatch` summary to include locked-skip count
-- [ ] T022 Add stale lock detection: if a lock is older than a configurable timeout (default: 2 hours), treat it as stale and allow override; log a warning when overriding stale locks
+- [ ] T018 Design and implement a `TrainingLock` protocol with `acquire(tenant_id) -> bool` and `release(tenant_id)` methods
+- [ ] T019 Implement `DataStoreTrainingLock` that uses the DataStore to record/check lock state (e.g., a row in an `ml_training_locks` table or equivalent)
+- [ ] T020 Integrate lock acquisition at the start of `CloudTrainer.train_tenant()` and release in a `finally` block
+- [ ] T021 Add lock-skip status to `TrainingRun` result (status: "skipped_locked") and include in batch summary
+- [ ] T022 Add stale lock detection: if a lock is older than a configurable timeout (default: 2 hours), treat it as stale and allow override
 
 ### Implementation Notes
 - The lock must be implemented at the data layer (not in-process) because multiple K8s pods could run training CronJobs concurrently.
-- Approach: an `ml_training_locks` table with `tenant_id` (UNIQUE), `acquired_at` (epoch ms), `pid` (process ID). Acquire = INSERT if not exists with recent timestamp. Release = DELETE.
-- Use database-level atomicity: `INSERT ... ON CONFLICT DO NOTHING` for Postgres. Check affected rows to determine if lock was acquired.
-- Stale lock detection prevents deadlocks from crashed training jobs. On acquire, also check if existing lock's `acquired_at` is older than the stale timeout and override if so.
+- A simple approach: an `ml_training_locks` table with `tenant_id`, `acquired_at`, `pid` columns. Acquire = INSERT if not exists with recent timestamp. Release = DELETE.
+- Stale lock detection prevents deadlocks from crashed training jobs.
 
 ### Parallel Opportunities
 - T018/T019 (lock protocol and implementation) can proceed in parallel with T021 (status dataclass update).
 
 ### Dependencies
-- Depends on WP02 (`CloudTrainer.train_tenant()` must exist to integrate the lock into).
+- Depends on WP02 (CloudTrainer.train_tenant exists to integrate with).
 
 ### Risks & Mitigations
-- Race condition on lock acquisition: Use database-level atomicity (`INSERT ... ON CONFLICT` for Postgres).
-- Lock not released on crash: Stale lock timeout (T022) provides automatic recovery.
+- Race condition on lock acquisition: Use database-level atomicity (INSERT ... ON CONFLICT for Postgres, or BEGIN IMMEDIATE for SQLite).
+- Lock not released on crash: Stale lock timeout (T022) mitigates this.
 
 **Requirements Refs**: FR-013
 
@@ -152,36 +148,36 @@
 
 ## Work Package WP05: Aggregate Model Training (Priority: P2)
 
-**Goal**: Implement aggregate model training that pools events from all opted-in tenants and trains shared aggregate models under the `__aggregate__` storage prefix. Include sampling/weighting to prevent large tenants from dominating. Wire the `--aggregate` CLI path.
-**Independent Test**: Opt in 5 tenants with diverse data volumes. Run `sigil-ml train --mode cloud --aggregate`. Verify pooled data from all 5 tenants is used (capped at max_tasks_per_tenant each), aggregate weights are saved to the `__aggregate__/` prefix, and a warning is logged if fewer than 3 tenants are opted in.
+**Goal**: Implement aggregate model training that pools events from all opted-in tenants and trains shared aggregate models. This is the Team-tier differentiator.
+**Independent Test**: Opt in 5 tenants, run `sigil-ml train --mode cloud --aggregate`. Verify pooled data from all 5 tenants is used and aggregate weights are saved to a shared storage prefix.
 **Prompt**: `/tasks/WP05-aggregate-model-training.md`
 **Estimated Prompt Size**: ~450 lines
 
 ### Included Subtasks
-- [ ] T023 Implement `discover_opted_in_tenants()` in `tenant_discovery.py`: query DataStore for tenants with `data_pooling_opted_in = true` (or equivalent opt-in flag)
-- [ ] T024 Implement data pooling: fetch completed tasks from all opted-in tenants via DataStore, combine into a single training dataset, maintaining tenant attribution for sampling
-- [ ] T025 Implement sampling/weighting strategy: cap each tenant's contribution at configurable maximum (default: 1000 tasks) to prevent large tenants from dominating the aggregate model
-- [ ] T026 Implement `CloudTrainer.train_aggregate() -> TrainingRun`: train all 5 model types on the pooled dataset, save weights via ModelStore targeting the `__aggregate__` tenant prefix
-- [ ] T027 Wire CLI `--mode cloud --aggregate` to invoke `train_aggregate()` and print structured JSON summary including opt-in tenant count, total samples after sampling, and models trained
-- [ ] T028 [P] Add minimum opt-in threshold check: log warning if fewer than `aggregate_min_tenants` (default: 3) tenants are opted in; training proceeds but flags the dataset as potentially insufficient
+- [ ] T023 Implement opt-in discovery: query DataStore for tenants with `data_pooling_opted_in = true` (or equivalent flag)
+- [ ] T024 Implement data pooling: fetch events/tasks from all opted-in tenants via DataStore, combine into a single training dataset
+- [ ] T025 Implement sampling/weighting strategy to prevent large tenants from dominating the aggregate model
+- [ ] T026 Implement `CloudTrainer.train_aggregate()` that trains all 5 model types on the pooled dataset and saves weights to a shared storage prefix (e.g., `__aggregate__/`)
+- [ ] T027 Wire CLI `--mode cloud --aggregate` to invoke aggregate training and print summary
+- [ ] T028 Add minimum opt-in threshold check: log warning if fewer than 3 tenants opted in (dataset may be insufficient)
 
 ### Implementation Notes
-- Aggregate weights are stored at a shared `__aggregate__` prefix (not tenant-scoped). Use `model_store.for_tenant("__aggregate__")` to scope the storage.
-- Sampling strategy: for each opted-in tenant, fetch up to `max_tasks_per_tenant` completed tasks. Pool all data into X/y arrays. Train using the same model classes as per-tenant training.
+- Aggregate weights are stored at a shared prefix (not tenant-scoped). The ModelStore must support a "shared" or "aggregate" key namespace separate from per-tenant prefixes.
+- Sampling strategy: proportional sampling with a cap per tenant (e.g., max 1000 tasks per tenant) to balance the dataset.
 - The same model training logic is reused — only the data source differs (pooled vs single-tenant).
-- Aggregate training should be independent of per-tenant training — it can run on its own schedule (e.g., daily vs hourly per-tenant).
+- Aggregate training should be run less frequently than per-tenant training (e.g., daily vs hourly).
 
 ### Parallel Opportunities
 - T023 (opt-in discovery) and T025 (sampling strategy) are independent design decisions.
 - T028 (threshold check) can be developed alongside T026.
 
 ### Dependencies
-- Depends on WP02 (per-tenant training logic — reuses the same model training and feature extraction functions).
+- Depends on WP02 (per-tenant training logic — reuses the same model training functions).
 
 ### Risks & Mitigations
 - Privacy: Only opted-in tenant data is used (FR-010). The opt-in flag must be checked at query time, not cached.
-- Data volume: Pooled data could be very large. Sampling cap per tenant (T025) mitigates memory pressure.
-- Tenant data leakage: Aggregate models inherently blend cross-user patterns. This is by design for Team tier. Documentation should make this clear.
+- Data volume: Pooled data could be very large. Sampling (T025) mitigates memory pressure.
+- Tenant data leakage: Aggregate models are shared, so they inherently blend patterns. This is by design for Team tier, but documentation should make it clear.
 
 **Requirements Refs**: FR-003, FR-010
 
@@ -189,35 +185,34 @@
 
 ## Work Package WP06: Training Observability & Structured Output (Priority: P2)
 
-**Goal**: Ensure all training operations produce structured, parseable JSON output suitable for K8s log collection and monitoring systems. Enhance dataclasses with all required fields. Add JSON Lines logging for cloud mode. Record audit events for all training runs.
-**Independent Test**: Run a batch training job, capture stdout. Verify output is valid JSON Lines with per-tenant status events and a batch summary event. Verify training audit events appear in `ml_training_runs` table.
+**Goal**: Ensure all training operations produce structured, parseable output suitable for monitoring systems. Add per-tenant training status, sample counts, durations, and error reporting.
+**Independent Test**: Run a batch training job. Capture stdout. Verify it is valid JSON with per-tenant status, sample counts, duration, and models trained. Verify training events appear in the audit log.
 **Prompt**: `/tasks/WP06-training-observability.md`
 **Estimated Prompt Size**: ~350 lines
 
 ### Included Subtasks
-- [ ] T029 Enhance `TrainingRun` and `TrainingSummary` dataclasses with all structured output fields: tenant_id, status (trained/skipped/failed/skipped_locked), sample_count, models_trained list, duration_ms, error_message (nullable), started_at, completed_at
-- [ ] T030 Implement JSON Lines event emitter for cloud training: emit structured JSON events to stdout at each stage (`tenant_start`, `tenant_complete`, `tenant_skip`, `tenant_fail`)
-- [ ] T031 Implement structured JSON summary output for batch training: emit `batch_complete` event with total/trained/skipped/failed counts and total duration
-- [ ] T032 [P] Implement structured JSON output for aggregate training: emit `aggregate_start`, `aggregate_complete` events with opt-in tenant count, total samples, and models trained
-- [ ] T033 Ensure all training runs (single-tenant, batch, aggregate) record audit events to `ml_training_runs` table with status, sample_count, duration_ms, and error details
+- [ ] T029 Enhance `TrainingRun` and `TrainingSummary` dataclasses with all required fields: tenant_id, status (trained/skipped/failed), sample_count, models_trained list, duration_sec, error_message (nullable)
+- [ ] T030 Implement structured JSON output for single-tenant training (printed to stdout when `--tenant` is used)
+- [ ] T031 Implement structured JSON summary output for batch training (printed to stdout when `--all-tenants` is used)
+- [ ] T032 Implement structured JSON output for aggregate training (printed to stdout when `--aggregate` is used)
+- [ ] T033 Ensure all training runs record audit events via DataStore with kind='training', including tenant_id, status, sample_count, duration
 
 ### Implementation Notes
-- Structured output must be parseable by monitoring systems (FR-008). Use JSON Lines format (one JSON object per line) for K8s log collection compatibility.
-- Separate structured output (stdout) from log messages (stderr). Use `logging.getLogger("sigil_ml.training")` with a JSON formatter for cloud mode stderr logs.
-- CLI should detect TTY vs pipe and format accordingly: pretty-print with colors for terminal, compact JSON Lines for pipes. A `--json` flag can force JSON output.
-- Audit events reuse the existing `ml_events` table pattern from `TrainingScheduler._log_retrain()`, extended with training-specific fields.
+- The structured output must be parseable by monitoring systems (FR-008). Use JSON format with a consistent schema across all training modes.
+- The CLI should detect TTY vs pipe and format accordingly (pretty-print for terminal, compact JSON for pipes). A `--json` flag can force JSON output.
+- Audit events (T033) reuse the existing `ml_events` table pattern from `TrainingScheduler._log_retrain()`.
 
 ### Parallel Opportunities
 - T029 (dataclass enhancement) can proceed in parallel with T030-T032 (output formatting).
 - T033 (audit events) is independent of the output formatting work.
 
 ### Dependencies
-- Depends on WP01 (TrainingRun/TrainingSummary dataclasses exist to enhance).
-- Depends on WP03 (batch training produces TrainingBatch to format).
+- Depends on WP01 (TrainingRun/TrainingSummary dataclasses exist).
+- Depends on WP03 (batch training produces summary to format).
 
 ### Risks & Mitigations
-- Output schema changes breaking monitoring: Define the JSON schema clearly in code comments for stability.
-- Mixing structured and log output: Ensure structured events go to stdout only; diagnostic log messages go to stderr.
+- Output schema changes breaking monitoring: Define the schema as a Pydantic model for validation and documentation.
+- Mixing structured and log output: Ensure structured output goes to stdout only; log messages go to stderr.
 
 **Requirements Refs**: FR-008, FR-009
 
@@ -225,9 +220,9 @@
 
 ## Dependency & Execution Summary
 
-- **Sequence**: WP01 --> WP02 --> WP03/WP04 (parallel) --> WP05 --> WP06
+- **Sequence**: WP01 → WP02 → WP03/WP04 (parallel) → WP05 → WP06
 - **Parallelization**: WP03 and WP04 can proceed in parallel once WP02 is complete. WP05 depends on WP02 but not WP03/WP04. WP06 depends on WP01 and WP03.
-- **MVP Scope**: WP01 + WP02 + WP03 constitute the minimum viable cloud training pipeline (single-tenant, batch, and tenant discovery). WP04 (locking) is strongly recommended for production safety. WP05 (aggregate) and WP06 (observability polish) are enhancement tiers.
+- **MVP Scope**: WP01 + WP02 + WP03 constitute the minimum viable cloud training pipeline (per-tenant and batch training). WP04 (locking) is recommended for production safety. WP05 (aggregate) and WP06 (observability) are polish.
 
 ---
 
@@ -238,24 +233,24 @@
 | T001 | Extend CLI with cloud training flags | WP01 | P0 | No |
 | T002 | Create CloudTrainer class skeleton | WP01 | P0 | No |
 | T003 | Implement train_tenant() method | WP01 | P0 | No |
-| T004 | Create TrainingRun/TrainingSummary/TrainingBatch/CloudTrainingConfig dataclasses | WP01 | P0 | Yes |
+| T004 | Create TrainingRun/TrainingSummary dataclasses | WP01 | P0 | Yes |
 | T005 | Wire CLI --tenant to CloudTrainer | WP01 | P0 | No |
 | T006 | Ensure local training unchanged | WP01 | P0 | No |
 | T007 | Data threshold check (10 tasks minimum) | WP02 | P0 | No |
-| T008 | Cold-start synthetic data fallback for all 5 models | WP02 | P0 | No |
+| T008 | Cold-start synthetic data fallback | WP02 | P0 | No |
 | T009 | Minimum interval enforcement | WP02 | P0 | No |
-| T010 | Feature extraction via DataStore (cloud-compatible) | WP02 | P0 | No |
+| T010 | Feature extraction via DataStore | WP02 | P0 | No |
 | T011 | Train all 5 model types per tenant | WP02 | P0 | No |
 | T012 | Record training audit events | WP02 | P0 | No |
 | T013 | Tenant discovery from DataStore | WP03 | P1 | No |
 | T014 | Implement train_all_tenants() | WP03 | P1 | No |
 | T015 | Fault isolation per tenant | WP03 | P1 | No |
 | T016 | Wire CLI --all-tenants to batch | WP03 | P1 | No |
-| T017 | Create/extend TrainingBatch dataclass | WP03 | P1 | Yes |
+| T017 | Create TrainingBatch dataclass | WP03 | P1 | Yes |
 | T018 | Design TrainingLock protocol | WP04 | P1 | No |
 | T019 | Implement DataStoreTrainingLock | WP04 | P1 | No |
 | T020 | Integrate lock into train_tenant() | WP04 | P1 | No |
-| T021 | Add skipped_locked status to TrainingRun | WP04 | P1 | Yes |
+| T021 | Add lock-skip status to TrainingRun | WP04 | P1 | Yes |
 | T022 | Stale lock detection and override | WP04 | P1 | No |
 | T023 | Opt-in tenant discovery | WP05 | P2 | No |
 | T024 | Data pooling across tenants | WP05 | P2 | No |
@@ -263,8 +258,8 @@
 | T026 | Implement train_aggregate() | WP05 | P2 | No |
 | T027 | Wire CLI --aggregate to aggregate training | WP05 | P2 | No |
 | T028 | Minimum opt-in threshold check | WP05 | P2 | Yes |
-| T029 | Enhance TrainingRun/Summary dataclasses for observability | WP06 | P2 | Yes |
-| T030 | JSON Lines event emitter for single-tenant training | WP06 | P2 | No |
-| T031 | Structured JSON summary for batch training | WP06 | P2 | No |
-| T032 | Structured JSON output for aggregate training | WP06 | P2 | Yes |
-| T033 | Audit event recording for all training modes | WP06 | P2 | Yes |
+| T029 | Enhance TrainingRun/Summary dataclasses | WP06 | P2 | Yes |
+| T030 | Structured JSON output for single-tenant | WP06 | P2 | No |
+| T031 | Structured JSON summary for batch | WP06 | P2 | No |
+| T032 | Structured JSON output for aggregate | WP06 | P2 | No |
+| T033 | Audit event recording for all training | WP06 | P2 | Yes |

@@ -20,6 +20,10 @@ env/
 .coverage
 htmlcov/
 
+# Pyre type checker (keep .pyre/taint_models/ tracked)
+.pyre/*
+!.pyre/taint_models/
+
 # IDE
 .idea/
 .vscode/
@@ -32,3 +36,19 @@ Thumbs.db
 
 # ML model weights
 *.joblib
+
+# Added by Spec Kitty CLI (auto-managed)
+.claude/
+.codex/
+.opencode/
+.windsurf/
+.gemini/
+.cursor/
+.qwen/
+.kilocode/
+.augment/
+.roo/
+.amazonq/
+.github/copilot/
+.kittify/.dashboard
+.kittify/missions/__pycache__/

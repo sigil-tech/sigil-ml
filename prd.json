@@ -1,0 +1,258 @@
+{
+  "project": "sigil-ml",
+  "branchName": "ralph/classify-predict-pipeline",
+  "description": "Replace hardcoded Thompson Sampling suggestions with a classify → predict → LLM pipeline. Add ActivityClassifier (8 semantic event categories) and WorkflowStatePredictor (flow state probability distribution). Remove all hardcoded suggestion actions and text. System starts rule-based and upgrades to ML as data accumulates.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Create ActivityClassifier with rule-based cold start",
+      "description": "As a sigil-ml developer, I need an ActivityClassifier model that categorizes raw events into semantic activity categories so that downstream models and the LLM understand what the user is doing.",
+      "acceptanceCriteria": [
+        "New file src/sigil_ml/models/activity.py with ActivityClassifier class",
+        "CATEGORIES constant defines 8 categories: creating, refining, verifying, navigating, researching, integrating, communicating, idle",
+        "At cold start, both creating and refining map to a single 'editing' category (split later when ML trains)",
+        "classify(event: dict) -> dict returns {category: str, confidence: float, method: 'rules'|'ml'}",
+        "classify_batch(events: list[dict]) -> list[dict] classifies a buffer of events",
+        "Rule-based classification covers all 6 event kinds: file, process, hyprland, git, terminal, ai",
+        "is_trained property returns False for rule-based, True after ML training",
+        "Weight persistence via joblib at weights_path('activity')",
+        "pytest tests/test_models.py passes with new ActivityClassifier tests"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "Follow the model pattern from stuck.py: FEATURE_NAMES constant, __init__ with weight loading, predict method, train method, is_trained property, _save method. For rule-based classification: kind=file → editing, kind=terminal + test/build cmd → verifying, kind=git → integrating, kind=ai → researching, kind=hyprland → navigating, kind=process → navigating. Use event.IsTestOrBuildCmd logic (check for go test, pytest, npm test, make, cargo test, etc.) to identify verifying terminal commands."
+    },
+    {
+      "id": "US-002",
+      "title": "Add activity feature extraction for ML training",
+      "description": "As a sigil-ml developer, I need feature extraction for the ActivityClassifier so that ML training has proper input features derived from event kind and payload.",
+      "acceptanceCriteria": [
+        "New function extract_activity_features(event: dict) -> dict in features.py",
+        "Features extracted from event kind, source, and payload fields",
+        "Features include: event kind one-hot (6 floats), payload key presence flags, command type classification for terminal events, file extension category for file events",
+        "Returns a flat dict of floats suitable for sklearn input",
+        "pytest tests/test_features.py passes with new tests"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Keep it simple. One-hot encode event.kind (file=1,0,0,0,0,0 etc). For terminal events, check if payload.cmd contains test/build keywords. For file events, extract extension from payload.path and categorize (.py, .go, .js → code, .md, .txt → docs, .json, .toml, .yaml → config). Include a has_exit_code flag and exit_code_nonzero flag from payload."
+    },
+    {
+      "id": "US-003",
+      "title": "Create WorkflowStatePredictor with rule-based cold start",
+      "description": "As a sigil-ml developer, I need a WorkflowStatePredictor that assesses the user's current workflow state from classified events, replacing the hardcoded SuggestionPolicy.",
+      "acceptanceCriteria": [
+        "New file src/sigil_ml/models/workflow.py with WorkflowStatePredictor class",
+        "FLOW_STATES constant: deep_work, shallow_work, exploring, blocked, winding_down",
+        "predict(classified_events: list[dict], session_info: dict) -> dict returns full state assessment",
+        "State assessment includes: flow_state (dict of probabilities summing to 1.0), dominant_state, momentum (-1 to 1), focus_score (0-1), dominant_activity, activity_distribution, session_elapsed_min, method, confidence",
+        "Rule-based prediction: high editing+low navigating → deep_work, high verifying+failures → blocked, high navigating+researching → exploring, high integrating+decreasing velocity → winding_down, default → shallow_work",
+        "Momentum computed by comparing event count in recent half vs older half of window",
+        "Focus score computed as inverse of Shannon entropy over activity category distribution normalized to 0-1",
+        "is_trained property returns False for rule-based, True after ML training",
+        "Weight persistence via joblib at weights_path('workflow')",
+        "pytest tests/test_models.py passes with new WorkflowStatePredictor tests"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "For Shannon entropy: H = -sum(p * log2(p)) for each category where p > 0. Max entropy = log2(num_categories). Focus score = 1 - (H / max_H). session_info dict has keys: session_elapsed_min (float), task_phase (str or None), test_failures (int). For momentum: split classified_events in half by index, count events in each half, momentum = (recent_count - older_count) / max(total_count, 1), clamp to [-1, 1]."
+    },
+    {
+      "id": "US-004",
+      "title": "Add workflow state feature extraction for ML training",
+      "description": "As a sigil-ml developer, I need feature extraction for the WorkflowStatePredictor so that ML training has proper window-level features.",
+      "acceptanceCriteria": [
+        "New function extract_workflow_features(classified_events: list[dict], session_info: dict) -> dict in features.py",
+        "Features include: 8 normalized category counts, category entropy, event rate (events/min), category transition count, time in dominant category fraction, recent bias weight",
+        "session_info dict includes session_elapsed_min, task_phase, test_failures",
+        "Returns flat dict of floats suitable for sklearn input",
+        "pytest tests/test_features.py passes with new tests"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "Category counts: count events per category, divide by total events. Category transitions: count how many times consecutive events have different categories. Recent bias: weight last 25% of events 2x in category counts. Event rate: len(events) / max(time_span_minutes, 1/60)."
+    },
+    {
+      "id": "US-005",
+      "title": "Add synthetic data generators for new models",
+      "description": "As a sigil-ml developer, I need synthetic data generators for the new models to support cold-start ML training.",
+      "acceptanceCriteria": [
+        "generate_activity_data(n=500) added to training/synthetic.py",
+        "Generates events with realistic kind/payload distributions and corresponding category labels",
+        "generate_workflow_data(n=200) added to training/synthetic.py",
+        "Generates classified-event windows with realistic activity distributions and flow state labels",
+        "Both add Gaussian noise and shuffle before returning",
+        "pytest tests/ passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "Follow the pattern from generate_stuck_data() and generate_duration_data() in the same file. For activity data: generate events with random kind values and payloads, assign categories based on rules. For workflow data: generate windows (lists of category counts) with labels — deep_work windows have high editing, low navigating; blocked windows have high verifying; exploring windows have high navigating+researching."
+    },
+    {
+      "id": "US-006",
+      "title": "Remove hardcoded suggestion strings from QualityEstimator",
+      "description": "As a sigil-ml developer, I want to remove hardcoded suggestion text from the QualityEstimator so that suggestion generation is entirely the LLM's responsibility.",
+      "acceptanceCriteria": [
+        "_suggest_for_degraded() function deleted from quality.py (currently at line 196)",
+        "suggestion key removed from predict() return dict in quality.py",
+        "QualityResponse in server.py no longer includes suggestion field",
+        "All quality scoring logic preserved unchanged — only suggestion text removed",
+        "grep -r '_suggest_for_degraded' src/ returns no results",
+        "pytest tests/ passes with updated assertions"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "In quality.py predict() method, find where suggestion is added to the return dict and remove it. Also remove the call to _suggest_for_degraded(). In server.py find QualityResponse and remove the suggestion: str | None field. Update test assertions that check for suggestion key in quality prediction output."
+    },
+    {
+      "id": "US-007",
+      "title": "Integrate ActivityClassifier into poller event processing",
+      "description": "As a sigil-ml user, I want every event classified as it enters the poller buffer so that downstream predictions have semantic activity context.",
+      "acceptanceCriteria": [
+        "Poller constructor accepts models['activity'] (ActivityClassifier instance)",
+        "Each event is classified as it enters the buffer in _poll_once()",
+        "Classified events stored in buffer as {...event, '_category': str, '_category_confidence': float}",
+        "Activity summary prediction written to ml_predictions with model='activity' on each prediction cycle",
+        "Activity prediction format: {window_summary: {category: count}, recent: [{ts, kind, category}], dominant: str, method: str, confidence: float}",
+        "recent array capped at last 10 events for token efficiency",
+        "pytest tests/ passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "In poller.py __init__, add self.activity = models['activity']. In _poll_once(), after appending event to buffer, call self.activity.classify(event) and add _category and _category_confidence keys to the event dict in the buffer. In _predict_and_write(), build the activity summary from self._buffer and write it using self._write(conn, 'activity', summary, confidence, PREDICTION_TTL_SEC)."
+    },
+    {
+      "id": "US-008",
+      "title": "Replace suggest prediction in poller with workflow state",
+      "description": "As a sigil-ml user, I want the poller to write workflow state assessments instead of hardcoded suggestion actions.",
+      "acceptanceCriteria": [
+        "Poller constructor accepts models['workflow'] (WorkflowStatePredictor) instead of models['suggest'] (SuggestionPolicy)",
+        "_predict_and_write() calls self.workflow.predict() instead of self.suggest.predict()",
+        "Prediction written to ml_predictions with model='suggest' (preserved name for Go compatibility)",
+        "New prediction format includes flow_state dict, dominant_state, momentum, focus_score, dominant_activity, activity_distribution, session_elapsed_min, method, confidence",
+        "_FALLBACK_SUGGEST updated to new format with shallow_work as default state and neutral momentum/focus",
+        "Old extract_suggest_features() call removed from poller",
+        "pytest tests/ passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "In poller.py, replace self.suggest with self.workflow. Build session_info dict from task data: session_elapsed_min from task started_at, task_phase from task phase, test_failures from task test_fails. Pass classified buffer events (with _category tags from US-007) and session_info to self.workflow.predict(). Write result to model='suggest'. Update _FALLBACK_SUGGEST to: {flow_state: {deep_work: 0, shallow_work: 1.0, exploring: 0, blocked: 0, winding_down: 0}, dominant_state: 'shallow_work', momentum: 0.0, focus_score: 0.5, dominant_activity: 'idle', activity_distribution: {}, session_elapsed_min: 0, method: 'rules', confidence: 0.5}."
+    },
+    {
+      "id": "US-009",
+      "title": "Delete SuggestionPolicy and related code",
+      "description": "As a sigil-ml developer, I want to remove all Thompson Sampling bandit code and hardcoded action strings so the codebase reflects the new architecture.",
+      "acceptanceCriteria": [
+        "src/sigil_ml/models/suggest.py file deleted",
+        "ACTIONS list no longer exists anywhere in codebase",
+        "extract_suggest_features() function removed from features.py",
+        "All references to SuggestionPolicy removed from server.py, poller.py, training/trainer.py",
+        "grep -r 'suggest_commit|suggest_break|suggest_step_back|ACTIONS|SuggestionPolicy' src/ returns no results",
+        "pytest tests/ passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "Delete src/sigil_ml/models/suggest.py entirely. In features.py remove the extract_suggest_features() function (lines 128-187) and its phase list. In training/trainer.py remove _train_suggest() method and its call from train_all(). In server.py remove SuggestRequest/SuggestResponse classes and old suggest endpoint imports. In test files remove any tests that directly test SuggestionPolicy. Make sure no import of suggest or SuggestionPolicy remains."
+    },
+    {
+      "id": "US-010",
+      "title": "Add /predict/activity API endpoint",
+      "description": "As a sigil-ml API consumer, I want a /predict/activity endpoint so I can query event classifications on demand.",
+      "acceptanceCriteria": [
+        "POST /predict/activity endpoint added to server.py",
+        "Request accepts optional events list or uses current poller buffer",
+        "Response returns activity summary: window_summary, recent, dominant, method, confidence",
+        "ActivityClassifier added to /health endpoint model status reporting",
+        "pytest tests/test_server.py passes with new endpoint tests"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Add ActivityRequest (events: list[dict] | None = None) and ActivityResponse (window_summary: dict, recent: list, dominant: str, method: str, confidence: float) Pydantic models. In the endpoint handler, if events provided classify them directly, otherwise return latest activity prediction from ml_predictions table. Add 'activity' to the models dict checked in /health."
+    },
+    {
+      "id": "US-011",
+      "title": "Replace /predict/suggest endpoint with workflow state response",
+      "description": "As a sigil-ml API consumer, I want the /predict/suggest endpoint to return workflow state assessments in the new format.",
+      "acceptanceCriteria": [
+        "/predict/suggest endpoint returns new schema: flow_state, dominant_state, momentum, focus_score, dominant_activity, activity_distribution, session_elapsed_min, method, confidence",
+        "Old SuggestRequest/SuggestResponse replaced with WorkflowStateRequest/WorkflowStateResponse Pydantic models",
+        "Request accepts optional task_id or pre-computed classified_events",
+        "Breaking change: old action+confidence format no longer returned",
+        "pytest tests/test_server.py passes with updated tests"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "WorkflowStateRequest(task_id: str | None = None, classified_events: list[dict] | None = None). WorkflowStateResponse(flow_state: dict[str, float], dominant_state: str, momentum: float, focus_score: float, dominant_activity: str, activity_distribution: dict[str, float], session_elapsed_min: float, method: str, confidence: float). If task_id provided, extract classified events from buffer and session_info from task. Call workflow model predict()."
+    },
+    {
+      "id": "US-012",
+      "title": "Update server startup and model wiring",
+      "description": "As a sigil-ml developer, I need the server startup to load and wire the new models correctly.",
+      "acceptanceCriteria": [
+        "ActivityClassifier instantiated and loaded at startup alongside other models",
+        "WorkflowStatePredictor instantiated and loaded at startup alongside other models",
+        "Old SuggestionPolicy import and instantiation removed",
+        "Models dict passed to poller includes 'activity' and 'workflow' keys instead of 'suggest'",
+        "/health endpoint reports status of all models including activity and workflow",
+        "sigil-ml serve starts without errors",
+        "pytest tests/ passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": "In server.py startup (around line 55-93), replace: from sigil_ml.models.suggest import SuggestionPolicy → from sigil_ml.models.activity import ActivityClassifier and from sigil_ml.models.workflow import WorkflowStatePredictor. Replace _suggest = SuggestionPolicy() with _activity = ActivityClassifier() and _workflow = WorkflowStatePredictor(). Update models dict passed to EventPoller: replace 'suggest': _suggest with 'activity': _activity, 'workflow': _workflow. Update /health to report _activity and _workflow status."
+    },
+    {
+      "id": "US-013",
+      "title": "Add ML training path for ActivityClassifier",
+      "description": "As a sigil-ml developer, I need ML training for the ActivityClassifier so it upgrades from rules to learned classification after sufficient data.",
+      "acceptanceCriteria": [
+        "ActivityClassifier.train(X, y) fits an SGDClassifier with partial_fit()",
+        "partial_fit() used for incremental learning (no full retrain needed)",
+        "New method _train_activity() added to training/trainer.py",
+        "Training collects events from events table and applies rule-based labels as initial training data",
+        "Reads ml_correction events (kind='ml_correction') for high-signal label overrides",
+        "Minimum 500 events required before first ML training",
+        "After training, classify() uses ML model instead of rules, with method='ml'",
+        "train_all() in trainer.py calls _train_activity()",
+        "pytest tests/ passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": "In activity.py add train(X, y) method that calls SGDClassifier(loss='log_loss').partial_fit(X, y, classes=CATEGORIES). The trainer._train_activity() should: query SELECT kind, payload FROM events ORDER BY id LIMIT 2000, extract features via extract_activity_features(), generate labels via rule-based classify(), then call activity.train(X, y). For ml_correction events: query SELECT payload FROM events WHERE kind='ml_correction', override the rule-based label with the correction."
+    },
+    {
+      "id": "US-014",
+      "title": "Add ML training path for WorkflowStatePredictor",
+      "description": "As a sigil-ml developer, I need ML training for the WorkflowStatePredictor so it upgrades from rules to learned state prediction after sufficient task data.",
+      "acceptanceCriteria": [
+        "WorkflowStatePredictor.train(X, y) fits a GradientBoostingClassifier",
+        "New method _train_workflow() added to training/trainer.py",
+        "Training extracts classified-event windows from completed tasks",
+        "Labels derived from task outcomes: fast completion with few failures → deep_work, long with many failures → blocked phases",
+        "Reads ml_feedback events (kind='ml_feedback') to reinforce state predictions",
+        "Minimum 20 completed tasks required before first ML training, falls back to generate_workflow_data() synthetic data",
+        "train_all() in trainer.py calls _train_workflow()",
+        "pytest tests/ passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": "Follow the pattern from _train_stuck() in trainer.py. Query completed tasks, for each task extract events in the task window, classify them with ActivityClassifier, compute workflow features via extract_workflow_features(). Label logic: if (completed_at - started_at) < median_duration AND test_fails < 3 → deep_work, if test_fails > 5 AND (completed_at - started_at) > 2*median_duration → blocked, else → shallow_work. Use GradientBoostingClassifier(n_estimators=100, max_depth=3, learning_rate=0.1) matching stuck.py config."
+    },
+    {
+      "id": "US-015",
+      "title": "Update training scheduler for new feedback signals",
+      "description": "As a sigil-ml developer, I want the training scheduler to trigger retraining based on new feedback events, not just completed tasks.",
+      "acceptanceCriteria": [
+        "Scheduler tracks ml_feedback event count since last retrain",
+        "Scheduler tracks ml_correction event count since last retrain",
+        "Activity classifier retraining triggers after 500 new events (separate from full retrain cycle)",
+        "Workflow retraining uses same trigger as stuck/duration (10 completed tasks, 1hr min interval)",
+        "Correction events trigger immediate activity retrain after 5 corrections",
+        "pytest tests/ passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": "In scheduler.py, add new counters: _last_event_count, _last_correction_count. In check_and_retrain(), query SELECT COUNT(*) FROM events to get total event count, and SELECT COUNT(*) FROM events WHERE kind='ml_correction' for corrections. If events since last check >= 500, trigger _train_activity() only. If corrections since last check >= 5, trigger _train_activity() immediately. Keep existing task-based trigger for full retrain (stuck + duration + workflow)."
+    }
+  ]
+}
