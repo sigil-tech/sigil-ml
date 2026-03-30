@@ -5,7 +5,6 @@ import logging
 
 from fastapi import FastAPI
 
-from sigil_ml import config
 from sigil_ml.models.activity import ActivityClassifier
 from sigil_ml.models.duration import DurationEstimator
 from sigil_ml.models.quality import QualityEstimator
@@ -13,7 +12,7 @@ from sigil_ml.models.stuck import StuckPredictor
 from sigil_ml.models.workflow import WorkflowStatePredictor
 from sigil_ml.poller import EventPoller
 from sigil_ml.routes import register_routes
-from sigil_ml.schema import ensure_ml_tables
+from sigil_ml.store import DataStore, create_store
 from sigil_ml.training.scheduler import TrainingScheduler
 
 logger = logging.getLogger("sigil_ml")
@@ -23,6 +22,7 @@ class AppState:
     """Holds model instances and runtime state, passed to routes."""
 
     def __init__(self) -> None:
+        self.store: DataStore | None = None
         self.stuck: StuckPredictor | None = None
         self.activity: ActivityClassifier | None = None
         self.workflow: WorkflowStatePredictor | None = None
@@ -60,17 +60,20 @@ def create_app() -> FastAPI:
 
     @application.on_event("startup")
     async def startup_event() -> None:
-        db = config.db_path()
+        store = create_store()
+        state.store = store
+
+        logger.info("sigil-ml: using %s backend", type(store).__name__)
 
         try:
-            ensure_ml_tables(db)
+            store.ensure_tables()
         except Exception:
             logger.warning("schema bootstrap failed (sigild may not have started yet)", exc_info=True)
 
         state.load_models()
 
         state.poller = EventPoller(
-            db_path=db,
+            store=store,
             models={
                 "stuck": state.stuck,
                 "activity": state.activity,
@@ -81,7 +84,7 @@ def create_app() -> FastAPI:
         )
         asyncio.create_task(state.poller.run())
 
-        scheduler = TrainingScheduler(db, reload_callback=state.reload_models_into_poller)
+        scheduler = TrainingScheduler(store, reload_callback=state.reload_models_into_poller)
 
         async def _schedule_loop():
             while True:
@@ -97,6 +100,9 @@ def create_app() -> FastAPI:
         if state.poller:
             state.poller.stop()
             logger.info("poller stopped")
+        if state.store:
+            state.store.close()
+            logger.info("store connection closed")
 
     return application
 

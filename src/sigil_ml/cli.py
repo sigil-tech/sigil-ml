@@ -5,7 +5,8 @@ import sys
 
 import uvicorn
 
-from sigil_ml import config
+from sigil_ml.store import create_store
+from sigil_ml.store_sqlite import SqliteStore
 from sigil_ml.training.trainer import Trainer
 
 
@@ -33,9 +34,14 @@ def main() -> None:
             log_level="info",
         )
     elif args.command == "train":
-        db = args.db or str(config.db_path())
-        print(f"Training models from {db} ...")
-        trainer = Trainer(db)
+        if args.db:
+            from pathlib import Path
+
+            store = SqliteStore(Path(args.db))
+        else:
+            store = create_store()
+        print(f"Training models using {type(store).__name__} ...")
+        trainer = Trainer(store)
         result = trainer.train_all()
         print(f"Done: {result}")
     elif args.command == "health-check":

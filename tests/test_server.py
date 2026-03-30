@@ -139,9 +139,9 @@ class TestTrainEndpoint:
         assert data["status"] == "started"
 
     def test_train_with_custom_db(self, client: TestClient, tmp_path) -> None:
+        # db field is deprecated but still accepted for backward compat
         db = str(tmp_path / "custom.db")
         resp = client.post("/train", json={"db": db})
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "started"
-        assert "custom.db" in data["message"]

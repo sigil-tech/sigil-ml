@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 import time
 from typing import TYPE_CHECKING
 
 from fastapi import BackgroundTasks, FastAPI
 from pydantic import BaseModel, Field
 
-from sigil_ml import config
 from sigil_ml.features import extract_duration_features, extract_stuck_features
 from sigil_ml.plugins import fetch_capabilities
 from sigil_ml.training.trainer import Trainer
@@ -72,7 +70,7 @@ class QualityResponse(BaseModel):
 
 
 class TrainRequest(BaseModel):
-    db: str | None = Field(None, description="Override path to SQLite database")
+    db: str | None = Field(None, description="Deprecated: ignored, kept for backward compat")
 
 
 class TrainResponse(BaseModel):
@@ -119,27 +117,14 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
 
     @fastapi_app.get("/status")
     async def status() -> dict:
-        db = config.db_path()
         try:
-            conn = sqlite3.connect(str(db), timeout=5.0)
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.row_factory = sqlite3.Row
-            try:
-                cursor_row = conn.execute("SELECT last_event_id, updated_at FROM ml_cursor WHERE id = 1").fetchone()
-                preds = conn.execute(
-                    "SELECT model, confidence, created_at FROM ml_predictions "
-                    "WHERE expires_at IS NULL OR expires_at > ? "
-                    "ORDER BY created_at DESC",
-                    (int(time.time() * 1000),),
-                ).fetchall()
-                return {
-                    "cursor": dict(cursor_row) if cursor_row else None,
-                    "latest_predictions": [dict(r) for r in preds],
-                    "poller_running": state.poller is not None and state.poller._running,
-                }
-            finally:
-                conn.close()
-        except sqlite3.OperationalError:
+            status_data = state.store.get_status_data()
+            return {
+                "cursor": status_data["cursor"],
+                "latest_predictions": status_data["latest_predictions"],
+                "poller_running": state.poller is not None and state.poller._running,
+            }
+        except Exception:
             return {"cursor": None, "latest_predictions": [], "poller_running": False}
 
     @fastapi_app.post("/predict/stuck", response_model=StuckResponse)
@@ -150,7 +135,7 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
         if req.features is not None:
             features = req.features
         elif req.task_id is not None:
-            features = extract_stuck_features(config.db_path(), req.task_id)
+            features = extract_stuck_features(state.store, req.task_id)
         else:
             return StuckResponse(probability=0.5, confidence="weak")
 
@@ -195,7 +180,7 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
         if req.features is not None:
             features = req.features
         elif req.task_id is not None:
-            features = extract_duration_features(config.db_path(), req.task_id)
+            features = extract_duration_features(state.store, req.task_id)
         else:
             return DurationResponse(estimated_minutes=60.0, confidence_interval=[30.0, 90.0])
 
@@ -223,16 +208,15 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
         if state.training_in_progress:
             return TrainResponse(status="busy", message="Training already in progress")
 
-        db = req.db or str(config.db_path())
-        background_tasks.add_task(_run_training, state, db)
-        return TrainResponse(status="started", message=f"Training started with db={db}")
+        background_tasks.add_task(_run_training, state)
+        return TrainResponse(status="started", message="Training started")
 
 
-def _run_training(state: AppState, db_path: str) -> None:
+def _run_training(state: AppState) -> None:
     """Run training in a background thread."""
     try:
         state.training_in_progress = True
-        trainer = Trainer(db_path)
+        trainer = Trainer(state.store)
         result = trainer.train_all()
         logger.info("Training complete: %s", result)
         state.load_models()

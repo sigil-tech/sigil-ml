@@ -1,10 +1,9 @@
 """Training scheduler — fires retraining when enough new data has accumulated."""
 
 import logging
-import sqlite3
 import time
-from pathlib import Path
 
+from sigil_ml.store import DataStore
 from sigil_ml.training.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -17,13 +16,13 @@ class TrainingScheduler:
     """Monitors completed task count and triggers retraining when due.
 
     Args:
-        db_path: Path to sigild SQLite database.
+        store: DataStore instance for data access.
         reload_callback: Called after successful retraining to reload
                          model instances into the running poller.
     """
 
-    def __init__(self, db_path: Path, reload_callback) -> None:
-        self.db_path = db_path
+    def __init__(self, store: DataStore, reload_callback) -> None:
+        self.store = store
         self._reload = reload_callback
         self._last_retrain: float = 0.0
         self._baseline_tasks: int = self._count_completed()
@@ -43,7 +42,7 @@ class TrainingScheduler:
             current - self._baseline_tasks,
         )
         try:
-            result = Trainer(self.db_path).train_all()
+            result = Trainer(self.store).train_all()
             self._last_retrain = time.time()
             self._baseline_tasks = current
             self._log_retrain(result)
@@ -54,31 +53,14 @@ class TrainingScheduler:
 
     def _count_completed(self) -> int:
         try:
-            conn = sqlite3.connect(str(self.db_path), timeout=5.0)
-            conn.execute("PRAGMA busy_timeout=5000")
-            try:
-                row = conn.execute("SELECT COUNT(*) FROM tasks WHERE completed_at IS NOT NULL").fetchone()
-                return row[0] if row else 0
-            finally:
-                conn.close()
-        except sqlite3.OperationalError:
+            return self.store.count_completed_tasks()
+        except Exception:
             return 0
 
     def _log_retrain(self, result: dict) -> None:
         try:
-            conn = sqlite3.connect(str(self.db_path), timeout=5.0)
-            conn.execute("PRAGMA busy_timeout=5000")
-            try:
-                conn.execute(
-                    "INSERT INTO ml_events (kind, endpoint, routing, latency_ms, ts) "
-                    "VALUES ('retrain', 'scheduler', 'local', ?, ?)",
-                    (
-                        int(result.get("duration_sec", 0) * 1000),
-                        int(time.time() * 1000),
-                    ),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        except sqlite3.OperationalError:
+            latency_ms = int(result.get("duration_sec", 0) * 1000)
+            self.store.insert_ml_event("retrain", "scheduler", "local", latency_ms)
+            self.store.commit()
+        except Exception:
             logger.warning("scheduler: failed to log retrain event")

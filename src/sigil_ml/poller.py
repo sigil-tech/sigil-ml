@@ -1,21 +1,20 @@
 """Event poller — continuous push-to-db prediction loop.
 
-Polls events → classifies activity → runs models → writes to ml_predictions.
+Polls events -> classifies activity -> runs models -> writes to ml_predictions.
 Runs as an asyncio background task inside the FastAPI process.
 """
 
 import asyncio
 import json
 import logging
-import sqlite3
 import time
-from pathlib import Path
 
 from sigil_ml.features import (
     extract_duration_features,
     extract_features_from_buffer,
     extract_stuck_features,
 )
+from sigil_ml.store import DataStore
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +29,8 @@ QUALITY_TTL_SEC = 120  # 2-minute expiry for quality
 class EventPoller:
     """Polls sigild's events table and writes predictions to ml_predictions."""
 
-    def __init__(self, db_path: Path, models: dict) -> None:
-        self.db_path = db_path
+    def __init__(self, store: DataStore, models: dict) -> None:
+        self.store = store
         self.stuck = models["stuck"]
         self.activity = models["activity"]
         self.workflow = models["workflow"]
@@ -45,69 +44,55 @@ class EventPoller:
     async def run(self) -> None:
         """Main loop — call as an asyncio task."""
         self._running = True
-        logger.info("poller: started against %s", self.db_path)
+        logger.info("poller: started with %s", type(self.store).__name__)
         while self._running:
             try:
                 await asyncio.get_event_loop().run_in_executor(None, self._poll_once)
-            except sqlite3.OperationalError as e:
+            except Exception as e:
                 # Database may not exist yet or be locked — retry silently.
-                logger.debug("poller: sqlite error (will retry): %s", e)
-            except Exception:
-                logger.exception("poller: unhandled error")
+                logger.debug("poller: store error (will retry): %s", e)
             await asyncio.sleep(POLL_INTERVAL_SEC)
 
     def stop(self) -> None:
         self._running = False
 
     def _poll_once(self) -> None:
-        conn = self._connect()
-        try:
-            cursor_id = conn.execute("SELECT last_event_id FROM ml_cursor WHERE id = 1").fetchone()
-            since = cursor_id[0] if cursor_id else 0
+        since = self.store.get_cursor()
 
-            rows = conn.execute(
-                "SELECT id, kind, source, payload, ts FROM events WHERE id > ? ORDER BY id ASC LIMIT 100",
-                (since,),
-            ).fetchall()
+        rows = self.store.get_events_since(since, limit=100)
 
-            if not rows:
-                return
+        if not rows:
+            return
 
-            events = []
-            for row in rows:
-                e = dict(zip(["id", "kind", "source", "payload", "ts"], row))
-                if isinstance(e.get("payload"), str):
-                    try:
-                        e["payload"] = json.loads(e["payload"])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+        events = []
+        for e in rows:
+            if isinstance(e.get("payload"), str):
+                try:
+                    e["payload"] = json.loads(e["payload"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
-                # Classify each event as it enters the buffer.
-                classification = self.activity.classify(e)
-                e["_category"] = classification["category"]
-                e["_category_confidence"] = classification["confidence"]
+            # Classify each event as it enters the buffer.
+            classification = self.activity.classify(e)
+            e["_category"] = classification["category"]
+            e["_category_confidence"] = classification["confidence"]
 
-                events.append(e)
+            events.append(e)
 
-            self._buffer.extend(events)
-            self._buffer = self._buffer[-200:]  # keep last 200
-            self._since_last_predict += len(events)
+        self._buffer.extend(events)
+        self._buffer = self._buffer[-200:]  # keep last 200
+        self._since_last_predict += len(events)
 
-            max_id = max(e["id"] for e in events)
-            conn.execute(
-                "UPDATE ml_cursor SET last_event_id = ?, updated_at = ? WHERE id = 1",
-                (max_id, int(time.time() * 1000)),
-            )
+        max_id = max(e["id"] for e in events)
+        self.store.update_cursor(max_id)
 
-            elapsed = time.time() - self._last_predict_time
-            if self._since_last_predict >= PREDICT_EVERY_N_EVENTS and elapsed >= PREDICT_MIN_INTERVAL_SEC:
-                self._predict_and_write(conn)
-                self._since_last_predict = 0
-                self._last_predict_time = time.time()
+        elapsed = time.time() - self._last_predict_time
+        if self._since_last_predict >= PREDICT_EVERY_N_EVENTS and elapsed >= PREDICT_MIN_INTERVAL_SEC:
+            self._predict_and_write()
+            self._since_last_predict = 0
+            self._last_predict_time = time.time()
 
-            conn.commit()
-        finally:
-            conn.close()
+        self.store.commit()
 
     # Fallback predictions for untrained models.
     _FALLBACK_STUCK = {"probability": 0.5, "confidence": "weak"}
@@ -130,57 +115,53 @@ class EventPoller:
     }
     _FALLBACK_DURATION = {"estimated_minutes": 60.0, "confidence_interval": [30.0, 90.0]}
 
-    def _predict_and_write(self, conn: sqlite3.Connection) -> None:
+    def _predict_and_write(self) -> None:
         start = time.time()
-        task_id = self._active_task_id(conn)
+        task_id = self.store.get_active_task()
 
         # Stuck prediction — check is_trained before calling predict.
         if self.stuck.is_trained:
             if task_id:
-                feats = extract_stuck_features(self.db_path, task_id)
+                feats = extract_stuck_features(self.store, task_id)
             else:
                 feats = extract_features_from_buffer(self._buffer)
             result = self.stuck.predict(feats)
         else:
             result = self._FALLBACK_STUCK
-        self._write(conn, "stuck", result, result.get("probability", 0.5), PREDICTION_TTL_SEC)
+        self.store.insert_prediction("stuck", result, result.get("probability", 0.5), PREDICTION_TTL_SEC)
 
         # Activity summary — classify and summarize the buffer.
         activity_result = self._activity_summary()
-        self._write(conn, "activity", activity_result, activity_result.get("confidence", 0.5), PREDICTION_TTL_SEC)
+        self.store.insert_prediction("activity", activity_result, activity_result.get("confidence", 0.5), PREDICTION_TTL_SEC)
 
         # Workflow state prediction — replaces old suggestion policy.
-        session_info = self._session_info(conn, task_id)
+        session_info = self._session_info(task_id)
         result = self.workflow.predict(self._buffer, session_info)
-        self._write(conn, "suggest", result, result.get("confidence", 0.5), PREDICTION_TTL_SEC)
+        self.store.insert_prediction("suggest", result, result.get("confidence", 0.5), PREDICTION_TTL_SEC)
 
         # Duration — only when active task AND model is trained.
         if task_id and self.duration.is_trained:
             try:
-                feats = extract_duration_features(self.db_path, task_id)
+                feats = extract_duration_features(self.store, task_id)
                 result = self.duration.predict(feats)
                 ci = result.get("confidence_interval", [30, 90])
                 est = result.get("estimated_minutes", 60)
                 rel_width = (ci[1] - ci[0]) / max(est, 1.0)
                 conf = max(0.0, min(1.0, 1.0 - rel_width / 2.0))
-                self._write(conn, "duration", result, conf, None)
+                self.store.insert_prediction("duration", result, conf, None)
             except Exception:
                 logger.debug("poller: duration prediction skipped", exc_info=True)
         elif task_id:
-            self._write(conn, "duration", self._FALLBACK_DURATION, 0.5, None)
+            self.store.insert_prediction("duration", self._FALLBACK_DURATION, 0.5, None)
 
         # Quality score — always callable (rule-based, no training required).
-        qfeats = self._quality_features(conn)
+        qfeats = self._quality_features()
         result = self.quality.predict(qfeats)
-        self._write(conn, "quality", result, result.get("score", 50) / 100.0, QUALITY_TTL_SEC)
+        self.store.insert_prediction("quality", result, result.get("score", 50) / 100.0, QUALITY_TTL_SEC)
 
         # Audit log
         latency_ms = int((time.time() - start) * 1000)
-        conn.execute(
-            "INSERT INTO ml_events (kind, endpoint, routing, latency_ms, ts) "
-            "VALUES ('prediction', 'poller', 'local', ?, ?)",
-            (latency_ms, int(time.time() * 1000)),
-        )
+        self.store.insert_ml_event("prediction", "poller", "local", latency_ms)
 
     def _activity_summary(self) -> dict:
         """Build activity summary from classified buffer events."""
@@ -208,22 +189,19 @@ class EventPoller:
             "confidence": round(avg_conf, 4),
         }
 
-    def _session_info(self, conn: sqlite3.Connection, task_id: str | None) -> dict:
+    def _session_info(self, task_id: str | None) -> dict:
         """Build session info for WorkflowStatePredictor."""
         session_elapsed_min = 0.0
         task_phase = None
         test_failures = 0
 
         if task_id:
-            row = conn.execute(
-                "SELECT started_at, phase, test_fails FROM tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
-            if row:
-                started_at = row[0] or 0
+            info = self.store.get_session_info(task_id)
+            if info:
+                started_at = info["started_at"] or 0
                 session_elapsed_min = (time.time() * 1000 - started_at) / 60000.0
-                task_phase = row[1]
-                test_failures = row[2] or 0
+                task_phase = info["phase"]
+                test_failures = info["test_fails"] or 0
 
         return {
             "session_elapsed_min": max(session_elapsed_min, 0.0),
@@ -231,28 +209,7 @@ class EventPoller:
             "test_failures": test_failures,
         }
 
-    def _write(
-        self,
-        conn: sqlite3.Connection,
-        model: str,
-        result: dict,
-        confidence: float,
-        ttl_sec: int | None,
-    ) -> None:
-        now_ms = int(time.time() * 1000)
-        expires_ms = (now_ms + ttl_sec * 1000) if ttl_sec else None
-        conn.execute(
-            "INSERT INTO ml_predictions (model, result, confidence, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
-            (model, json.dumps(result), round(confidence, 4), now_ms, expires_ms),
-        )
-
-    def _active_task_id(self, conn: sqlite3.Connection) -> str | None:
-        row = conn.execute(
-            "SELECT id FROM tasks WHERE phase != 'idle' AND completed_at IS NULL ORDER BY last_active DESC LIMIT 1"
-        ).fetchone()
-        return row[0] if row else None
-
-    def _quality_features(self, conn: sqlite3.Connection) -> dict:
+    def _quality_features(self) -> dict:
         now_ms = int(time.time() * 1000)
         window_start = now_ms - QUALITY_WINDOW_SEC * 1000
         window = [e for e in self._buffer if e.get("ts", 0) >= window_start]
@@ -269,21 +226,18 @@ class EventPoller:
         commit_events = [e for e in window if e.get("kind") == "git"]
         terminal_events = [e for e in window if e.get("kind") == "terminal"]
 
-        row = conn.execute(
-            "SELECT test_runs, test_fails, commit_count FROM tasks "
-            "WHERE completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT 1"
-        ).fetchone()
+        stats = self.store.get_quality_task_stats()
 
-        if row and row[0]:
-            test_pass_rate = 1.0 - (row[1] / max(row[0], 1))
-            baseline_commits = max(row[2], 1)
+        if stats and stats["test_runs"]:
+            test_pass_rate = 1.0 - (stats["test_fails"] / max(stats["test_runs"], 1))
+            baseline_commits = max(stats["commit_count"], 1)
         else:
             test_pass_rate = 0.7
             baseline_commits = 1
 
         return {
             "test_pass_rate": max(0.0, min(1.0, test_pass_rate)),
-            "test_total": row[0] if row else 0,
+            "test_total": stats["test_runs"] if stats else 0,
             "edit_focus": max(0.0, min(1.0, edit_focus)),
             "velocity_ratio": min(edits / max(len(terminal_events), 1), 2.0),
             "commits_in_window": len(commit_events),
@@ -291,9 +245,3 @@ class EventPoller:
             "revert_count": 0,
             "edits_in_window": edits,
         }
-
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=5.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        return conn

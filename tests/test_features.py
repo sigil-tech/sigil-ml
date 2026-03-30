@@ -1,4 +1,4 @@
-"""Tests for feature extraction from SQLite."""
+"""Tests for feature extraction using the DataStore abstraction."""
 
 import json
 import sqlite3
@@ -13,6 +13,7 @@ from sigil_ml.features import (
     extract_duration_features,
     extract_stuck_features,
 )
+from sigil_ml.store_sqlite import SqliteStore
 
 
 @pytest.fixture
@@ -103,18 +104,25 @@ def test_db(tmp_path: Path) -> Path:
     return db_path
 
 
+@pytest.fixture
+def store(test_db: Path) -> SqliteStore:
+    """Create a SqliteStore backed by the test database."""
+    s = SqliteStore(test_db)
+    return s
+
+
 class TestQueryHelpers:
-    def test_query_task_exists(self, test_db: Path) -> None:
-        task = _query_task(test_db, "task-1")
+    def test_query_task_exists(self, store: SqliteStore) -> None:
+        task = _query_task(store, "task-1")
         assert task is not None
         assert task["branch"] == "feature/add-widget"
         assert task["phase"] == "coding"
 
-    def test_query_task_not_found(self, test_db: Path) -> None:
-        assert _query_task(test_db, "nonexistent") is None
+    def test_query_task_not_found(self, store: SqliteStore) -> None:
+        assert _query_task(store, "nonexistent") is None
 
-    def test_query_events(self, test_db: Path) -> None:
-        events = _query_events_for_task(test_db, "task-1")
+    def test_query_events(self, store: SqliteStore) -> None:
+        events = _query_events_for_task(store, "task-1")
         assert len(events) > 0
         kinds = [e["kind"] for e in events]
         assert "edit" in kinds
@@ -122,8 +130,8 @@ class TestQueryHelpers:
 
 
 class TestStuckFeatures:
-    def test_basic_extraction(self, test_db: Path) -> None:
-        features = extract_stuck_features(test_db, "task-1")
+    def test_basic_extraction(self, store: SqliteStore) -> None:
+        features = extract_stuck_features(store, "task-1")
         assert "test_failure_count" in features
         assert "time_in_phase_sec" in features
         assert "edit_velocity" in features
@@ -135,26 +143,26 @@ class TestStuckFeatures:
         assert features["session_length_sec"] > 0
         assert features["edit_velocity"] >= 0
 
-    def test_missing_task(self, test_db: Path) -> None:
-        features = extract_stuck_features(test_db, "nonexistent")
+    def test_missing_task(self, store: SqliteStore) -> None:
+        features = extract_stuck_features(store, "nonexistent")
         assert features["test_failure_count"] == 0.0
         assert features["session_length_sec"] == 0.0
 
-    def test_file_switch_rate(self, test_db: Path) -> None:
-        features = extract_stuck_features(test_db, "task-1")
+    def test_file_switch_rate(self, store: SqliteStore) -> None:
+        features = extract_stuck_features(store, "task-1")
         # We have edits to main.py and utils.py
         assert 0.0 < features["file_switch_rate"] <= 1.0
 
 
 class TestDurationFeatures:
-    def test_basic_extraction(self, test_db: Path) -> None:
-        features = extract_duration_features(test_db, "task-1")
+    def test_basic_extraction(self, store: SqliteStore) -> None:
+        features = extract_duration_features(store, "task-1")
         assert features["file_count"] == 2.0
         assert features["total_edits"] >= 0
         assert 0 <= features["time_of_day_hour"] < 24
         assert features["branch_name_length"] == len("feature/add-widget")
 
-    def test_missing_task(self, test_db: Path) -> None:
-        features = extract_duration_features(test_db, "nonexistent")
+    def test_missing_task(self, store: SqliteStore) -> None:
+        features = extract_duration_features(store, "nonexistent")
         assert features["file_count"] == 0.0
         assert features["branch_name_length"] == 0.0

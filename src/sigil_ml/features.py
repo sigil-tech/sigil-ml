@@ -1,13 +1,16 @@
-"""Feature extraction from SQLite events for ML models."""
+"""Feature extraction for ML models.
+
+All database access goes through the DataStore protocol — no direct sqlite3 usage.
+"""
 
 from __future__ import annotations
 
 import json
 import math
-import sqlite3
 import time
-from pathlib import Path
 from typing import Any
+
+from sigil_ml.store import DataStore
 
 # --- Activity classification features ---
 
@@ -67,63 +70,30 @@ def extract_activity_features(event: dict) -> dict[str, float]:
     return features
 
 
-def _query_task(db_path: str | Path, task_id: str) -> dict[str, Any] | None:
-    """Read a single task row from the tasks table."""
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        cur = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
-        row = cur.fetchone()
-        if row is None:
-            return None
-        return dict(row)
-    finally:
-        conn.close()
+def _query_task(store: DataStore, task_id: str) -> dict[str, Any] | None:
+    """Read a single task row from the tasks table via DataStore."""
+    return store.get_task_by_id(task_id)
 
 
-def _query_events_for_task(db_path: str | Path, task_id: str, since: int | None = None) -> list[dict[str, Any]]:
-    """Read events that fall within a task's time window.
+def _query_events_for_task(store: DataStore, task_id: str, since: int | None = None) -> list[dict[str, Any]]:
+    """Read events that fall within a task's time window via DataStore.
 
     Args:
-        db_path: Path to the SQLite database.
+        store: DataStore instance.
         task_id: The task ID to look up.
         since: Optional unix-millis lower bound; defaults to the task's started_at.
     """
-    task = _query_task(db_path, task_id)
-    if task is None:
-        return []
-
-    start = since if since is not None else task.get("started_at", 0)
-    end = task.get("completed_at") or task.get("last_active") or int(time.time() * 1000)
-
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        cur = conn.execute(
-            "SELECT * FROM events WHERE ts >= ? AND ts <= ? ORDER BY ts",
-            (start, end),
-        )
-        rows = [dict(r) for r in cur.fetchall()]
-        # Parse JSON payload
-        for row in rows:
-            if isinstance(row.get("payload"), str):
-                try:
-                    row["payload"] = json.loads(row["payload"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-        return rows
-    finally:
-        conn.close()
+    return store.get_events_for_task(task_id, since=since)
 
 
-def extract_stuck_features(db_path: str | Path, task_id: str) -> dict[str, float]:
+def extract_stuck_features(store: DataStore, task_id: str) -> dict[str, float]:
     """Extract features for the stuck predictor.
 
     Returns:
         Dict with keys: test_failure_count, time_in_phase_sec, edit_velocity,
         file_switch_rate, session_length_sec, time_since_last_commit_sec
     """
-    task = _query_task(db_path, task_id)
+    task = store.get_task_by_id(task_id)
     if task is None:
         return {
             "test_failure_count": 0.0,
@@ -134,7 +104,7 @@ def extract_stuck_features(db_path: str | Path, task_id: str) -> dict[str, float
             "time_since_last_commit_sec": 0.0,
         }
 
-    events = _query_events_for_task(db_path, task_id)
+    events = store.get_events_for_task(task_id)
 
     now_ms = int(time.time() * 1000)
     started_at = task.get("started_at", now_ms)
@@ -182,13 +152,13 @@ def extract_stuck_features(db_path: str | Path, task_id: str) -> dict[str, float
     }
 
 
-def extract_duration_features(db_path: str | Path, task_id: str) -> dict[str, float]:
+def extract_duration_features(store: DataStore, task_id: str) -> dict[str, float]:
     """Extract features for the duration estimator.
 
     Returns:
         Dict with keys: file_count, total_edits, time_of_day_hour, branch_name_length
     """
-    task = _query_task(db_path, task_id)
+    task = store.get_task_by_id(task_id)
     if task is None:
         return {
             "file_count": 0.0,
@@ -207,7 +177,7 @@ def extract_duration_features(db_path: str | Path, task_id: str) -> dict[str, fl
     file_count = float(len(files_map)) if isinstance(files_map, dict) else 0.0
 
     # Total edits from events
-    events = _query_events_for_task(db_path, task_id)
+    events = store.get_events_for_task(task_id)
     total_edits = float(len([e for e in events if e.get("kind") in ("edit", "file_edit", "save")]))
 
     # Time of day

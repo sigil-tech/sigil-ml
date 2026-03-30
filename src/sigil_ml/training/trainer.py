@@ -1,9 +1,7 @@
-"""Trainer: reads from the user's SQLite DB and retrains all models."""
+"""Trainer: reads from the DataStore and retrains all models."""
 
 import logging
-import sqlite3
 import time
-from pathlib import Path
 
 import numpy as np
 
@@ -12,6 +10,7 @@ from sigil_ml.models.duration import FEATURE_NAMES as DURATION_FEATURES
 from sigil_ml.models.duration import DurationEstimator
 from sigil_ml.models.stuck import FEATURE_NAMES as STUCK_FEATURES
 from sigil_ml.models.stuck import StuckPredictor
+from sigil_ml.store import DataStore
 from sigil_ml.training.synthetic import generate_duration_data, generate_stuck_data
 
 logger = logging.getLogger(__name__)
@@ -20,8 +19,8 @@ logger = logging.getLogger(__name__)
 class Trainer:
     """Orchestrates training of all sigil-ml models from local data."""
 
-    def __init__(self, db_path: str | Path) -> None:
-        self.db_path = Path(db_path)
+    def __init__(self, store: DataStore) -> None:
+        self.store = store
 
     def train_all(self) -> dict:
         """Train all models and return a summary.
@@ -56,19 +55,10 @@ class Trainer:
         Returns:
             Number of samples used, or 0 if insufficient data.
         """
-        if not self.db_path.exists():
-            logger.warning("Database not found: %s", self.db_path)
-            return 0
+        task_ids = self.store.get_completed_task_ids()
 
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = conn.execute("SELECT id FROM tasks WHERE completed_at IS NOT NULL").fetchall()
-        finally:
-            conn.close()
-
-        if len(rows) < 10:
-            logger.info("Not enough completed tasks for stuck training (%d)", len(rows))
+        if len(task_ids) < 10:
+            logger.info("Not enough completed tasks for stuck training (%d)", len(task_ids))
             X, y = generate_stuck_data(500)
             predictor = StuckPredictor()
             predictor.train(X, y)
@@ -76,9 +66,8 @@ class Trainer:
 
         X_list = []
         y_list = []
-        for row in rows:
-            task_id = row["id"]
-            features = extract_stuck_features(self.db_path, task_id)
+        for task_id in task_ids:
+            features = extract_stuck_features(self.store, task_id)
             x = [features.get(f, 0.0) for f in STUCK_FEATURES]
             X_list.append(x)
             # Heuristic label: stuck if high test failures and long time in phase
@@ -98,18 +87,7 @@ class Trainer:
         Returns:
             Number of samples used, or 0 if insufficient data.
         """
-        if not self.db_path.exists():
-            return 0
-
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = conn.execute(
-                "SELECT id, started_at, completed_at FROM tasks "
-                "WHERE completed_at IS NOT NULL AND started_at IS NOT NULL"
-            ).fetchall()
-        finally:
-            conn.close()
+        rows = self.store.get_completed_tasks_with_timestamps()
 
         if len(rows) < 10:
             logger.info("Not enough completed tasks for duration training (%d)", len(rows))
@@ -122,7 +100,7 @@ class Trainer:
         y_list = []
         for row in rows:
             task_id = row["id"]
-            features = extract_duration_features(self.db_path, task_id)
+            features = extract_duration_features(self.store, task_id)
             x = [features.get(f, 0.0) for f in DURATION_FEATURES]
             X_list.append(x)
             # Duration in minutes
