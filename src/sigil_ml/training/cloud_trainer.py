@@ -1,0 +1,617 @@
+"""Cloud training orchestrator using DataStore and ModelStore abstractions.
+
+Supports per-tenant, batch (all-tenants), and aggregate training modes.
+Does NOT subclass or modify the local Trainer -- it is a parallel
+implementation that reuses model classes' .train() methods directly.
+"""
+
+from __future__ import annotations
+
+import io
+import logging
+import random
+import time
+from datetime import datetime, timezone
+from typing import Any
+
+import joblib
+import numpy as np
+
+from sigil_ml.features import (
+    extract_duration_features_from_data,
+    extract_stuck_features_from_data,
+)
+from sigil_ml.models.duration import FEATURE_NAMES as DURATION_FEATURES
+from sigil_ml.models.duration import DurationEstimator
+from sigil_ml.models.stuck import FEATURE_NAMES as STUCK_FEATURES
+from sigil_ml.models.stuck import StuckPredictor
+from sigil_ml.storage.model_store import ModelStore
+from sigil_ml.store import DataStore
+from sigil_ml.training.models import (
+    CloudTrainingConfig,
+    TrainingBatch,
+    TrainingRun,
+)
+from sigil_ml.training.synthetic import generate_duration_data, generate_stuck_data
+
+logger = logging.getLogger(__name__)
+
+AGGREGATE_TENANT_ID = "__aggregate__"
+
+
+class CloudTrainer:
+    """Orchestrates model training for cloud deployments.
+
+    Uses DataStore for reading training data and ModelStore for
+    persisting trained model weights. Supports per-tenant, batch,
+    and aggregate training modes.
+    """
+
+    def __init__(
+        self,
+        data_store: DataStore,
+        model_store: ModelStore,
+        config: CloudTrainingConfig | None = None,
+        training_lock: Any | None = None,
+    ) -> None:
+        self.data_store = data_store
+        self.model_store = model_store
+        self.config = config or CloudTrainingConfig()
+        self.training_lock = training_lock
+
+    # ------------------------------------------------------------------
+    # Per-tenant training (WP02)
+    # ------------------------------------------------------------------
+
+    def train_tenant(self, tenant_id: str) -> TrainingRun:
+        """Train all models for a single tenant.
+
+        Flow: lock -> interval check -> threshold check -> train -> save -> audit.
+        """
+        start = time.time()
+        started_at = datetime.now(timezone.utc)
+
+        # Lock check (if configured) -- before ANY other operation (WP04)
+        if self.training_lock is not None:
+            if not self.training_lock.acquire(tenant_id):
+                return TrainingRun(
+                    tenant_id=tenant_id,
+                    status="skipped_locked",
+                    duration_ms=int((time.time() - start) * 1000),
+                    started_at=started_at,
+                    completed_at=datetime.now(timezone.utc),
+                )
+
+        try:
+            return self._train_tenant_inner(tenant_id, start, started_at)
+        except Exception as e:
+            elapsed = time.time() - start
+            logger.error(
+                "Training failed for tenant %s: %s",
+                tenant_id,
+                e,
+                exc_info=True,
+            )
+            run = TrainingRun(
+                tenant_id=tenant_id,
+                status="failed",
+                error=str(e)[:500],
+                duration_ms=int(elapsed * 1000),
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+            )
+            self._record_audit_event(tenant_id, run)
+            return run
+        finally:
+            if self.training_lock is not None:
+                self.training_lock.release(tenant_id)
+
+    def _train_tenant_inner(
+        self, tenant_id: str, start: float, started_at: datetime
+    ) -> TrainingRun:
+        """Core per-tenant training logic (interval, threshold, train, audit)."""
+        # 1. Interval check (cheapest -- avoids all data queries if too recent)
+        last_ts = self._get_last_training_ts(tenant_id)
+        if last_ts is not None:
+            elapsed_sec = time.time() - (last_ts / 1000.0)
+            if elapsed_sec < self.config.min_interval_sec:
+                logger.info(
+                    "Skipping tenant %s: trained %d sec ago (interval: %d sec)",
+                    tenant_id,
+                    int(elapsed_sec),
+                    self.config.min_interval_sec,
+                )
+                run = TrainingRun(
+                    tenant_id=tenant_id,
+                    status="skipped",
+                    duration_ms=int((time.time() - start) * 1000),
+                    started_at=started_at,
+                    completed_at=datetime.now(timezone.utc),
+                )
+                self._record_audit_event(tenant_id, run)
+                return run
+
+        # 2. Data threshold check
+        tasks = self._query_completed_tasks(tenant_id)
+        has_sufficient_data = len(tasks) >= self.config.min_tasks
+
+        # 3. Synthetic fallback if insufficient data
+        if not has_sufficient_data:
+            logger.info(
+                "Tenant %s has %d tasks (< %d), using synthetic data",
+                tenant_id,
+                len(tasks),
+                self.config.min_tasks,
+            )
+            models_trained = self._train_synthetic(tenant_id)
+            elapsed_ms = int((time.time() - start) * 1000)
+            run = TrainingRun(
+                tenant_id=tenant_id,
+                status="trained",
+                sample_count=500,
+                models_trained=models_trained,
+                duration_ms=elapsed_ms,
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+            )
+            self._record_audit_event(tenant_id, run)
+            return run
+
+        # 4. Real data: extract features and build task_events map
+        task_events: dict[str, list[dict]] = {}
+        for task in tasks:
+            events = self._query_events_for_task(tenant_id, task["id"])
+            task_events[task["id"]] = events
+
+        # 5. Train all models from real data
+        models_trained = self._train_models_from_tasks(
+            tasks, task_events, tenant_id
+        )
+
+        elapsed_ms = int((time.time() - start) * 1000)
+        run = TrainingRun(
+            tenant_id=tenant_id,
+            status="trained",
+            sample_count=len(tasks),
+            models_trained=models_trained,
+            duration_ms=elapsed_ms,
+            started_at=started_at,
+            completed_at=datetime.now(timezone.utc),
+        )
+        self._record_audit_event(tenant_id, run)
+        return run
+
+    def _train_synthetic(self, tenant_id: str) -> list[str]:
+        """Train stuck and duration models with synthetic data (cold-start)."""
+        models_trained: list[str] = []
+
+        # Stuck predictor -- synthetic
+        try:
+            X_stuck, y_stuck = generate_stuck_data(500)
+            stuck = StuckPredictor(model_store=self.model_store)
+            stuck.train(X_stuck, y_stuck)
+            self._save_model_to_store("stuck", stuck, tenant_id)
+            models_trained.append("stuck")
+        except Exception:
+            logger.warning(
+                "Failed to train synthetic stuck model for tenant %s",
+                tenant_id,
+                exc_info=True,
+            )
+
+        # Duration estimator -- synthetic
+        try:
+            X_dur, y_dur = generate_duration_data(500)
+            duration = DurationEstimator(model_store=self.model_store)
+            duration.train(X_dur, y_dur)
+            self._save_model_to_store("duration", duration, tenant_id)
+            models_trained.append("duration")
+        except Exception:
+            logger.warning(
+                "Failed to train synthetic duration model for tenant %s",
+                tenant_id,
+                exc_info=True,
+            )
+
+        return models_trained
+
+    def _train_models_from_tasks(
+        self,
+        tasks: list[dict],
+        task_events: dict[str, list[dict]],
+        tenant_id: str,
+    ) -> list[str]:
+        """Train all model types from provided tasks and events.
+
+        Shared by train_tenant() (single-tenant) and train_aggregate() (pooled).
+
+        Returns:
+            List of model names that were successfully trained.
+        """
+        models_trained: list[str] = []
+
+        # --- Stuck predictor ---
+        try:
+            X_stuck_list: list[list[float]] = []
+            y_stuck_list: list[float] = []
+            for task in tasks:
+                events = task_events.get(task["id"], [])
+                feats = extract_stuck_features_from_data(task, events)
+                x = [feats.get(f, 0.0) for f in STUCK_FEATURES]
+                X_stuck_list.append(x)
+                # Heuristic label: stuck if high test failures AND long time in phase
+                stuck = (
+                    feats["test_failure_count"] > 3
+                    and feats["time_in_phase_sec"] > 600
+                )
+                y_stuck_list.append(1.0 if stuck else 0.0)
+
+            if X_stuck_list:
+                X_stuck = np.array(X_stuck_list)
+                y_stuck = np.array(y_stuck_list)
+                stuck_predictor = StuckPredictor(model_store=self.model_store)
+                stuck_predictor.train(X_stuck, y_stuck)
+                self._save_model_to_store("stuck", stuck_predictor, tenant_id)
+                models_trained.append("stuck")
+        except Exception:
+            logger.warning(
+                "Failed to train stuck model for tenant %s",
+                tenant_id,
+                exc_info=True,
+            )
+
+        # --- Duration estimator ---
+        try:
+            X_dur_list: list[list[float]] = []
+            y_dur_list: list[float] = []
+            for task in tasks:
+                events = task_events.get(task["id"], [])
+                feats = extract_duration_features_from_data(task, events)
+                x = [feats.get(f, 0.0) for f in DURATION_FEATURES]
+                X_dur_list.append(x)
+                # Duration label: (completed_at - started_at) in minutes, min 1.0
+                started = task.get("started_at", 0)
+                completed = task.get("completed_at", 0)
+                if started and completed:
+                    duration_min = (completed - started) / 60000.0
+                    y_dur_list.append(max(duration_min, 1.0))
+                else:
+                    y_dur_list.append(60.0)  # default 60 min if timestamps missing
+
+            if X_dur_list:
+                X_dur = np.array(X_dur_list)
+                y_dur = np.array(y_dur_list)
+                dur_estimator = DurationEstimator(model_store=self.model_store)
+                dur_estimator.train(X_dur, y_dur)
+                self._save_model_to_store("duration", dur_estimator, tenant_id)
+                models_trained.append("duration")
+        except Exception:
+            logger.warning(
+                "Failed to train duration model for tenant %s",
+                tenant_id,
+                exc_info=True,
+            )
+
+        # --- Activity classifier ---
+        # Rule-based by default (no ML training needed for cold-start).
+        # ActivityClassifier uses heuristic classification without trained weights.
+        # Skip training; default rules apply.
+
+        # --- Workflow state predictor ---
+        # Also rule-based by default. Skip training; default rules apply.
+
+        # --- Quality estimator ---
+        # Uses weight-based scoring. Skip training; default weights apply.
+
+        return models_trained
+
+    # ------------------------------------------------------------------
+    # Batch training (WP03)
+    # ------------------------------------------------------------------
+
+    def train_all_tenants(self) -> TrainingBatch:
+        """Discover and train all eligible tenants in batch.
+
+        Each tenant is trained independently. Failures for individual
+        tenants do not interrupt the batch (FR-007).
+
+        Returns:
+            TrainingBatch with per-tenant TrainingRun results.
+        """
+        start = time.time()
+        tenants = self._discover_tenants()
+
+        batch = TrainingBatch(
+            started_at=datetime.now(timezone.utc),
+        )
+
+        for i, tenant_id in enumerate(tenants, 1):
+            logger.info(
+                "Processing tenant %d/%d: %s", i, len(tenants), tenant_id
+            )
+            run = self._train_tenant_safe(tenant_id)
+            batch.runs.append(run)
+
+        batch.total_duration_ms = int((time.time() - start) * 1000)
+        batch.completed_at = datetime.now(timezone.utc)
+
+        logger.info(
+            "Batch complete: %d trained, %d skipped, %d failed (of %d total) in %dms",
+            batch.trained,
+            batch.skipped,
+            batch.failed,
+            batch.total,
+            batch.total_duration_ms,
+        )
+
+        # Record batch-level audit event (WP06)
+        try:
+            self.data_store.insert_ml_event(
+                kind="batch_training",
+                endpoint="cloud_trainer",
+                routing="__batch__",
+                latency_ms=batch.total_duration_ms,
+            )
+            self.data_store.commit()
+        except Exception:
+            logger.warning("Failed to record batch audit event", exc_info=True)
+
+        return batch
+
+    def _train_tenant_safe(self, tenant_id: str) -> TrainingRun:
+        """Train a tenant with full error isolation.
+
+        Catches all exceptions, logs them, and returns a failed TrainingRun
+        instead of propagating the error.
+        """
+        try:
+            return self.train_tenant(tenant_id)
+        except Exception as e:
+            logger.error(
+                "Training failed for tenant %s: %s",
+                tenant_id,
+                str(e),
+                exc_info=True,
+            )
+            error_msg = str(e)[:500] if len(str(e)) > 500 else str(e)
+            return TrainingRun(
+                tenant_id=tenant_id,
+                status="failed",
+                error=error_msg,
+            )
+
+    def _discover_tenants(self) -> list[str]:
+        """Discover all tenants with synced data."""
+        from sigil_ml.training.tenant_discovery import discover_eligible_tenants
+
+        return discover_eligible_tenants(self.data_store)
+
+    # ------------------------------------------------------------------
+    # Aggregate training (WP05)
+    # ------------------------------------------------------------------
+
+    def train_aggregate(self) -> TrainingRun:
+        """Train aggregate models from pooled opted-in tenant data.
+
+        Returns a TrainingRun with tenant_id="__aggregate__".
+        """
+        start = time.time()
+        started_at = datetime.now(timezone.utc)
+
+        try:
+            return self._train_aggregate_inner(start, started_at)
+        except Exception as e:
+            elapsed = time.time() - start
+            logger.error("Aggregate training failed: %s", e, exc_info=True)
+            run = TrainingRun(
+                tenant_id=AGGREGATE_TENANT_ID,
+                status="failed",
+                error=str(e)[:500],
+                duration_ms=int(elapsed * 1000),
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+            )
+            self._record_audit_event(AGGREGATE_TENANT_ID, run)
+            return run
+
+    def _train_aggregate_inner(
+        self, start: float, started_at: datetime
+    ) -> TrainingRun:
+        """Core aggregate training logic."""
+        # 1. Discover opted-in tenants
+        tenant_ids = self._discover_opted_in_tenants()
+
+        # 2. Minimum opt-in threshold warning (T028)
+        warning_msg: str | None = None
+        if len(tenant_ids) < self.config.aggregate_min_tenants:
+            warning_msg = (
+                f"Only {len(tenant_ids)} opted-in tenants "
+                f"(recommended minimum: {self.config.aggregate_min_tenants}). "
+                f"Aggregate model may be unreliable."
+            )
+            logger.warning(warning_msg)
+
+        if not tenant_ids:
+            run = TrainingRun(
+                tenant_id=AGGREGATE_TENANT_ID,
+                status="skipped",
+                error="No opted-in tenants found",
+                duration_ms=int((time.time() - start) * 1000),
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+            )
+            self._record_audit_event(AGGREGATE_TENANT_ID, run)
+            return run
+
+        # 3. Pool data from all opted-in tenants
+        all_tasks, task_events, tenant_counts = self._pool_training_data(
+            tenant_ids
+        )
+
+        # 4. Apply sampling strategy
+        sampled_tasks = self._sample_pooled_data(all_tasks, tenant_counts)
+        total_samples = len(sampled_tasks)
+
+        if total_samples == 0:
+            run = TrainingRun(
+                tenant_id=AGGREGATE_TENANT_ID,
+                status="skipped",
+                error="No tasks found across opted-in tenants",
+                duration_ms=int((time.time() - start) * 1000),
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+            )
+            self._record_audit_event(AGGREGATE_TENANT_ID, run)
+            return run
+
+        # 5. Extract features and train all models
+        models_trained = self._train_models_from_tasks(
+            sampled_tasks,
+            task_events,
+            tenant_id=AGGREGATE_TENANT_ID,
+        )
+
+        # 6. Build result
+        elapsed_ms = int((time.time() - start) * 1000)
+        run = TrainingRun(
+            tenant_id=AGGREGATE_TENANT_ID,
+            status="trained",
+            sample_count=total_samples,
+            models_trained=models_trained,
+            duration_ms=elapsed_ms,
+            error=warning_msg,  # Non-fatal warning included in output
+            started_at=started_at,
+            completed_at=datetime.now(timezone.utc),
+        )
+        self._record_audit_event(AGGREGATE_TENANT_ID, run)
+        return run
+
+    def _discover_opted_in_tenants(self) -> list[str]:
+        """Discover tenants opted in to aggregate data pooling."""
+        from sigil_ml.training.tenant_discovery import discover_opted_in_tenants
+
+        return discover_opted_in_tenants(self.data_store)
+
+    def _pool_training_data(
+        self, tenant_ids: list[str]
+    ) -> tuple[list[dict], dict[str, list[dict]], dict[str, int]]:
+        """Pool training data from multiple opted-in tenants.
+
+        Returns:
+            (all_tasks, task_events, tenant_task_counts)
+            - all_tasks: list of task dicts, each tagged with _tenant_id
+            - task_events: dict mapping task_id -> list of event dicts
+            - tenant_task_counts: dict mapping tenant_id -> task count
+        """
+        all_tasks: list[dict] = []
+        task_events: dict[str, list[dict]] = {}
+        tenant_counts: dict[str, int] = {}
+
+        for tenant_id in tenant_ids:
+            tasks = self._query_completed_tasks(tenant_id)
+            tenant_counts[tenant_id] = len(tasks)
+
+            for task in tasks:
+                task["_tenant_id"] = tenant_id  # Tag with source tenant
+                events = self._query_events_for_task(tenant_id, task["id"])
+                all_tasks.append(task)
+                task_events[task["id"]] = events
+
+        logger.info(
+            "Pooled %d total tasks from %d tenants (before sampling)",
+            len(all_tasks),
+            len(tenant_ids),
+        )
+        return all_tasks, task_events, tenant_counts
+
+    def _sample_pooled_data(
+        self,
+        all_tasks: list[dict],
+        tenant_counts: dict[str, int],
+    ) -> list[dict]:
+        """Apply per-tenant sampling caps to pooled data.
+
+        Each tenant contributes at most max_tasks_per_tenant tasks.
+        Sampling is deterministic (seeded RNG) for reproducibility.
+
+        Returns:
+            Sampled task list.
+        """
+        max_per = self.config.max_tasks_per_tenant
+        rng = random.Random(42)  # deterministic for reproducibility
+
+        sampled: list[dict] = []
+        for tenant_id in tenant_counts:
+            tenant_tasks = [
+                t for t in all_tasks if t.get("_tenant_id") == tenant_id
+            ]
+
+            if len(tenant_tasks) > max_per:
+                logger.info(
+                    "Sampling %d/%d tasks from tenant %s (cap: %d)",
+                    max_per,
+                    len(tenant_tasks),
+                    tenant_id,
+                    max_per,
+                )
+                tenant_tasks = rng.sample(tenant_tasks, max_per)
+
+            sampled.extend(tenant_tasks)
+
+        logger.info(
+            "Aggregate dataset after sampling: %d tasks from %d tenants",
+            len(sampled),
+            len(tenant_counts),
+        )
+        return sampled
+
+    # ------------------------------------------------------------------
+    # Helper methods
+    # ------------------------------------------------------------------
+
+    def _save_model_to_store(
+        self, model_name: str, model: Any, tenant_id: str
+    ) -> None:
+        """Serialize a trained model and save via ModelStore with tenant prefix."""
+        buf = io.BytesIO()
+        joblib.dump(model.model, buf)
+        # Save with tenant-scoped key: {tenant_id}/{model_name}
+        scoped_name = f"{tenant_id}/{model_name}"
+        self.model_store.save(scoped_name, buf.getvalue())
+
+    def _record_audit_event(self, tenant_id: str, run: TrainingRun) -> None:
+        """Record a training audit event via DataStore."""
+        try:
+            kind = "training"
+            if tenant_id == AGGREGATE_TENANT_ID:
+                kind = "aggregate_training"
+            self.data_store.insert_ml_event(
+                kind=kind,
+                endpoint="cloud_trainer",
+                routing=tenant_id,
+                latency_ms=run.duration_ms,
+            )
+            self.data_store.commit()
+        except Exception:
+            logger.warning(
+                "Failed to record training event for tenant %s",
+                tenant_id,
+                exc_info=True,
+            )
+
+    def _get_last_training_ts(self, tenant_id: str) -> float | None:
+        """Get the last training timestamp for a tenant.
+
+        Returns epoch milliseconds, or None if never trained.
+        """
+        return self.data_store.get_last_training_ts(tenant_id)
+
+    def _query_completed_tasks(self, tenant_id: str) -> list[dict]:
+        """Query completed tasks for a tenant via the DataStore protocol."""
+        return self.data_store.get_completed_tasks_for_tenant(tenant_id)
+
+    def _query_events_for_task(
+        self, tenant_id: str, task_id: str
+    ) -> list[dict]:
+        """Query events for a specific task via the DataStore protocol."""
+        return self.data_store.get_events_for_task_id(task_id)

@@ -252,3 +252,29 @@ class SqliteStore:
             "VALUES (?, ?, ?, ?, ?)",
             (kind, endpoint, routing, latency_ms, int(time.time() * 1000)),
         )
+
+    # --- Cloud training methods (not supported in local SQLite mode) ---
+
+    def get_last_training_ts(self, tenant_id: str) -> float | None:
+        """Not supported in local mode."""
+        raise NotImplementedError("get_last_training_ts is a cloud-only method")
+
+    def get_completed_tasks_for_tenant(self, tenant_id: str) -> list[dict]:
+        """Not supported in local mode."""
+        raise NotImplementedError("get_completed_tasks_for_tenant is a cloud-only method")
+
+    def get_events_for_task_id(self, task_id: str) -> list[dict]:
+        """Not supported in local mode."""
+        raise NotImplementedError("get_events_for_task_id is a cloud-only method")
+
+    def get_all_tenant_ids(self) -> list[str]:
+        """Not supported in local mode."""
+        raise NotImplementedError("get_all_tenant_ids is a cloud-only method")
+
+    def get_opted_in_tenant_ids(self) -> list[str]:
+        """Not supported in local mode."""
+        raise NotImplementedError("get_opted_in_tenant_ids is a cloud-only method")
+
+    def record_training_run(self, tenant_id: str, status: str, duration_ms: int) -> None:
+        """Not supported in local mode."""
+        raise NotImplementedError("record_training_run is a cloud-only method")
