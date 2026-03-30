@@ -16,6 +16,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+from sigil_ml.signals.profile import BehaviorProfile, RollingStat
+
+__all__ = [
+    "BehaviorProfile",
+    "RollingStat",
+    "Signal",
+]
+
+
 @dataclass
 class Signal:
     """A structured signal emitted when a model detects something noteworthy.
