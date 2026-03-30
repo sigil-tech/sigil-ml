@@ -70,6 +70,18 @@ def make_tenant_dependency(state: AppState):
                 status_code=401,
                 detail=f"Missing required header '{header}' for cloud mode.",
             )
-        return TenantContext(tenant_id=tenant_id.strip())
+        tenant_id = tenant_id.strip()
+
+        from sigil_ml.config import validate_tenant_id
+
+        if not validate_tenant_id(tenant_id):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid tenant ID '{tenant_id}'. "
+                    "Must be 1-63 characters of lowercase alphanumeric, hyphens, or underscores."
+                ),
+            )
+        return TenantContext(tenant_id=tenant_id)
 
     return get_tenant_context

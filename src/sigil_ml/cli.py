@@ -272,11 +272,14 @@ def _build_cloud_training_config(
 
     return CloudTrainingConfig(
         min_interval_sec=min_interval
-        or int(os.environ.get("SIGIL_ML_TRAIN_MIN_INTERVAL", "3600")),
+        if min_interval is not None
+        else int(os.environ.get("SIGIL_ML_TRAIN_MIN_INTERVAL", "3600")),
         min_tasks=min_tasks
-        or int(os.environ.get("SIGIL_ML_TRAIN_MIN_TASKS", "10")),
+        if min_tasks is not None
+        else int(os.environ.get("SIGIL_ML_TRAIN_MIN_TASKS", "10")),
         max_tasks_per_tenant=max_tasks_per_tenant
-        or int(os.environ.get("SIGIL_ML_TRAIN_MAX_TASKS_PER_TENANT", "1000")),
+        if max_tasks_per_tenant is not None
+        else int(os.environ.get("SIGIL_ML_TRAIN_MAX_TASKS_PER_TENANT", "1000")),
     )
 
 

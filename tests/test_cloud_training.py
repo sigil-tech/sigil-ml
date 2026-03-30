@@ -78,8 +78,28 @@ class MockDataStore:
     def query_completed_tasks(self, tenant_id: str) -> list[dict]:
         return list(self._tasks.get(tenant_id, []))
 
+    def get_completed_tasks_for_tenant(self, tenant_id: str) -> list[dict]:
+        return list(self._tasks.get(tenant_id, []))
+
     def query_events_for_task(self, tenant_id: str, task_id: str) -> list[dict]:
         return list(self._events.get(task_id, []))
+
+    def get_events_for_task_id(self, task_id: str) -> list[dict]:
+        return list(self._events.get(task_id, []))
+
+    def get_all_tenant_ids(self) -> list[str]:
+        return list(self._tenants)
+
+    def get_opted_in_tenant_ids(self) -> list[str]:
+        return list(self._opted_in_tenants)
+
+    def record_training_run(self, tenant_id: str, status: str, duration_ms: int) -> None:
+        self._ml_events.append({
+            "kind": "training",
+            "endpoint": "cloud_trainer",
+            "routing": tenant_id,
+            "latency_ms": duration_ms,
+        })
 
     # Existing DataStore protocol methods (fallback path)
     def get_completed_task_ids(self) -> list[str]:
@@ -476,9 +496,9 @@ class TestCloudTrainerPerTenant:
         """Errors during training return a failed TrainingRun."""
         from sigil_ml.training.cloud_trainer import CloudTrainer
 
-        # DataStore that raises on query_completed_tasks
+        # DataStore that raises on get_completed_tasks_for_tenant
         data_store = MockDataStore()
-        data_store.query_completed_tasks = MagicMock(side_effect=ValueError("boom"))
+        data_store.get_completed_tasks_for_tenant = MagicMock(side_effect=ValueError("boom"))
         model_store = MockModelStore()
         trainer = CloudTrainer(data_store, model_store)
         run = trainer.train_tenant("t1")
@@ -550,15 +570,15 @@ class TestBatchTraining:
             tasks_per_tenant={"t1": [], "t2": tasks_t2},
             events_per_task=events_t2,
         )
-        # Make t1 fail by having query_completed_tasks raise for t1
-        original_query = data_store.query_completed_tasks
+        # Make t1 fail by having get_completed_tasks_for_tenant raise for t1
+        original_query = data_store.get_completed_tasks_for_tenant
 
         def failing_query(tenant_id: str) -> list[dict]:
             if tenant_id == "t1":
                 raise ConnectionError("DB unreachable for t1")
             return original_query(tenant_id)
 
-        data_store.query_completed_tasks = failing_query  # type: ignore[assignment]
+        data_store.get_completed_tasks_for_tenant = failing_query  # type: ignore[assignment]
         model_store = MockModelStore()
         trainer = CloudTrainer(data_store, model_store)
         batch = trainer.train_all_tenants()
@@ -673,7 +693,7 @@ class TestTrainingLock:
 
         lock = MockTrainingLock()
         data_store = MockDataStore()
-        data_store.query_completed_tasks = MagicMock(side_effect=RuntimeError("db error"))
+        data_store.get_completed_tasks_for_tenant = MagicMock(side_effect=RuntimeError("db error"))
         model_store = MockModelStore()
         trainer = CloudTrainer(data_store, model_store, training_lock=lock)
         run = trainer.train_tenant("t1")
@@ -908,7 +928,7 @@ class TestObservability:
         from sigil_ml.training.cloud_trainer import CloudTrainer
 
         data_store = MockDataStore()
-        data_store.query_completed_tasks = MagicMock(side_effect=ValueError("fail"))
+        data_store.get_completed_tasks_for_tenant = MagicMock(side_effect=ValueError("fail"))
         model_store = MockModelStore()
         trainer = CloudTrainer(data_store, model_store)
         run = trainer.train_tenant("t1")

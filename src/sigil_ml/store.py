@@ -104,6 +104,32 @@ class DataStore(Protocol):
         """Close the underlying database connection."""
         ...
 
+    # --- Cloud training methods ---
+
+    def get_last_training_ts(self, tenant_id: str) -> float | None:
+        """Return the last training timestamp (epoch ms) for a tenant, or None if never trained."""
+        ...
+
+    def get_completed_tasks_for_tenant(self, tenant_id: str) -> list[dict]:
+        """Return completed tasks for a specific tenant (cloud multi-tenant queries)."""
+        ...
+
+    def get_events_for_task_id(self, task_id: str) -> list[dict]:
+        """Return events associated with a specific task ID."""
+        ...
+
+    def get_all_tenant_ids(self) -> list[str]:
+        """Return all known tenant IDs."""
+        ...
+
+    def get_opted_in_tenant_ids(self) -> list[str]:
+        """Return tenant IDs opted in to aggregate data pooling."""
+        ...
+
+    def record_training_run(self, tenant_id: str, status: str, duration_ms: int) -> None:
+        """Record a training run audit entry for a tenant."""
+        ...
+
 
 def create_store(mode: str | None = None) -> DataStore:
     """Create the appropriate DataStore based on operating mode.
