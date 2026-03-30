@@ -1,10 +1,12 @@
 """CLI entry point for sigil-ml."""
 
 import argparse
+import os
 import sys
 
 import uvicorn
 
+from sigil_ml.config import resolve_mode
 from sigil_ml.storage.model_store import model_store_factory
 from sigil_ml.store import create_store
 from sigil_ml.store_sqlite import SqliteStore
@@ -19,6 +21,12 @@ def main() -> None:
     serve_parser = sub.add_parser("serve", help="Start the ML server")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=7774)
+    serve_parser.add_argument(
+        "--mode",
+        choices=["local", "cloud"],
+        default=None,
+        help="Serving mode: 'local' (default, with poller) or 'cloud' (stateless, no SQLite)",
+    )
 
     train_parser = sub.add_parser("train", help="Train models from local data")
     train_parser.add_argument("--db", help="Path to sigild SQLite database")
@@ -28,6 +36,9 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "serve":
+        mode = resolve_mode(args.mode)
+        # Bridge mode to create_app() via env var (uvicorn string import cannot pass args)
+        os.environ["SIGIL_ML_MODE"] = mode.value
         uvicorn.run(
             "sigil_ml.app:app",
             host=args.host,

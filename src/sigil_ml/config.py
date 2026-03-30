@@ -2,8 +2,42 @@
 
 from __future__ import annotations
 
+import enum
 import os
 from pathlib import Path
+
+
+class ServingMode(str, enum.Enum):
+    """Operating mode for the sigil-ml service.
+
+    LOCAL: Default. Poller, SQLite, local models. Current behavior.
+    CLOUD: Stateless. No poller, no SQLite, tenant-aware model loading.
+    """
+
+    LOCAL = "local"
+    CLOUD = "cloud"
+
+
+def resolve_mode(cli_mode: str | None = None) -> ServingMode:
+    """Resolve the serving mode from CLI flag or environment.
+
+    Priority:
+      1. cli_mode argument (from --mode flag)
+      2. SIGIL_ML_MODE environment variable
+      3. Default: LOCAL
+
+    Raises:
+        SystemExit: If the provided mode value is invalid.
+    """
+    raw = cli_mode or os.environ.get("SIGIL_ML_MODE", "local")
+    if not raw or not raw.strip():
+        raw = "local"
+    try:
+        return ServingMode(raw.strip().lower())
+    except ValueError:
+        raise SystemExit(
+            f"Invalid serving mode: {raw!r}. Must be 'local' or 'cloud'."
+        )
 
 
 def _data_home() -> Path:

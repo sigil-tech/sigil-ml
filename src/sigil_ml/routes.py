@@ -6,11 +6,18 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from sigil_ml import config
+from sigil_ml.config import ServingMode
 from sigil_ml.features import extract_duration_features, extract_stuck_features
+from sigil_ml.models.stuck import StuckPredictor
+from sigil_ml.models.workflow import WorkflowStatePredictor
+from sigil_ml.models.duration import DurationEstimator
+from sigil_ml.models.quality import QualityEstimator
 from sigil_ml.plugins import fetch_capabilities
+from sigil_ml.tenant import TenantContext, make_tenant_dependency
 from sigil_ml.training.trainer import Trainer
 
 if TYPE_CHECKING:
@@ -80,11 +87,44 @@ class TrainResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
+    mode: str = "local"  # Default for backward compatibility
     models: dict[str, str]
     uptime_sec: float
 
 
 _start_time = time.time()
+
+
+# ---------- Centralized fallback predictions for cloud mode ----------
+# These match existing fallbacks in poller.py and routes.py.
+
+FALLBACK_STUCK = StuckResponse(probability=0.5, confidence="weak")
+
+FALLBACK_SUGGEST = WorkflowStateResponse(
+    flow_state={
+        "shallow_work": 1.0,
+        "deep_work": 0.0,
+        "exploring": 0.0,
+        "blocked": 0.0,
+        "winding_down": 0.0,
+    },
+    dominant_state="shallow_work",
+    momentum=0.0,
+    focus_score=0.5,
+    dominant_activity="idle",
+    activity_distribution={},
+    session_elapsed_min=0.0,
+    method="rules",
+    confidence=0.5,
+)
+
+FALLBACK_DURATION = DurationResponse(
+    estimated_minutes=60.0, confidence_interval=[30.0, 90.0]
+)
+
+FALLBACK_QUALITY = QualityResponse(
+    score=50, components={}, status="normal"
+)
 
 
 # ---------- Route registration ----------
@@ -93,8 +133,33 @@ _start_time = time.time()
 def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
     """Register all API routes on the given FastAPI app."""
 
+    get_tenant = make_tenant_dependency(state)
+
     @fastapi_app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
+        if state.mode == ServingMode.CLOUD:
+            models_status: dict[str, str] = {}
+            if state.model_cache:
+                tenants = state.model_cache.loaded_tenants()
+                all_cached_models: set[str] = set()
+                for model_list in tenants.values():
+                    all_cached_models.update(model_list)
+                for name in ["stuck", "activity", "workflow", "duration", "quality"]:
+                    models_status[name] = (
+                        "cached" if name in all_cached_models else "on_demand"
+                    )
+            else:
+                for name in ["stuck", "activity", "workflow", "duration", "quality"]:
+                    models_status[name] = "not_initialized"
+
+            return HealthResponse(
+                status="ok",
+                mode="cloud",
+                models=models_status,
+                uptime_sec=round(time.time() - _start_time, 1),
+            )
+
+        # Local mode: existing behavior with mode field added
         models_status = {}
         for name, model in [
             ("stuck", state.stuck),
@@ -111,24 +176,70 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
 
         return HealthResponse(
             status="ok",
+            mode="local",
             models=models_status,
             uptime_sec=round(time.time() - _start_time, 1),
         )
 
     @fastapi_app.get("/status")
     async def status() -> dict:
+        if state.mode == ServingMode.CLOUD:
+            cache_stats = (
+                state.model_cache.stats() if state.model_cache else {}
+            )
+            loaded = (
+                state.model_cache.loaded_tenants()
+                if state.model_cache
+                else {}
+            )
+            return {
+                "mode": "cloud",
+                "cache": cache_stats,
+                "loaded_tenants": loaded,
+                "request_counts": dict(state.request_counters),
+                "poller_running": False,
+            }
+
+        # Local mode: existing SQLite-based status (unchanged)
         try:
             status_data = state.store.get_status_data()
             return {
+                "mode": "local",
                 "cursor": status_data["cursor"],
                 "latest_predictions": status_data["latest_predictions"],
                 "poller_running": state.poller is not None and state.poller._running,
             }
         except Exception:
-            return {"cursor": None, "latest_predictions": [], "poller_running": False}
+            return {"mode": "local", "cursor": None, "latest_predictions": [], "poller_running": False}
 
     @fastapi_app.post("/predict/stuck", response_model=StuckResponse)
-    async def predict_stuck(req: StuckRequest) -> StuckResponse:
+    async def predict_stuck(
+        req: StuckRequest,
+        tenant: TenantContext = Depends(get_tenant),
+    ) -> StuckResponse:
+        if state.mode == ServingMode.CLOUD:
+            state.count_request(tenant.tenant_id)
+            if req.features is None:
+                if req.task_id is not None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Cloud mode requires 'features' in request body. "
+                               "'task_id' lookup is not available without SQLite.",
+                    )
+                return FALLBACK_STUCK
+
+            model = state.resolve_model(tenant.tenant_id, "stuck")
+            if model is None:
+                return FALLBACK_STUCK
+
+            # Use wrapper to get prediction from resolved model
+            predictor = StuckPredictor.__new__(StuckPredictor)
+            predictor.model = model
+            predictor._trained = True
+            result = predictor.predict(req.features)
+            return StuckResponse(**result)
+
+        # Local mode: unchanged
         if state.stuck is None:
             return StuckResponse(probability=0.5, confidence="weak")
 
@@ -143,7 +254,41 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
         return StuckResponse(**result)
 
     @fastapi_app.post("/predict/suggest", response_model=WorkflowStateResponse)
-    async def predict_suggest(req: WorkflowStateRequest) -> WorkflowStateResponse:
+    async def predict_suggest(
+        req: WorkflowStateRequest,
+        tenant: TenantContext = Depends(get_tenant),
+    ) -> WorkflowStateResponse:
+        if state.mode == ServingMode.CLOUD:
+            state.count_request(tenant.tenant_id)
+            classified_events = req.classified_events or []
+
+            if not classified_events:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cloud mode requires 'classified_events' in request body. "
+                           "Poller buffer is not available.",
+                )
+
+            model = state.resolve_model(tenant.tenant_id, "workflow")
+            if model is None:
+                # Use rules-based fallback via a fresh predictor
+                predictor = WorkflowStatePredictor.__new__(WorkflowStatePredictor)
+                predictor._ml_model = None
+                predictor._trained = False
+            else:
+                predictor = WorkflowStatePredictor.__new__(WorkflowStatePredictor)
+                predictor._ml_model = model
+                predictor._trained = True
+
+            session_info = {
+                "session_elapsed_min": 0.0,
+                "task_phase": None,
+                "test_failures": 0,
+            }
+            result = predictor.predict(classified_events, session_info)
+            return WorkflowStateResponse(**result)
+
+        # Local mode: unchanged
         if state.workflow is None:
             return WorkflowStateResponse(
                 flow_state={
@@ -173,7 +318,33 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
         return WorkflowStateResponse(**result)
 
     @fastapi_app.post("/predict/duration", response_model=DurationResponse)
-    async def predict_duration(req: DurationRequest) -> DurationResponse:
+    async def predict_duration(
+        req: DurationRequest,
+        tenant: TenantContext = Depends(get_tenant),
+    ) -> DurationResponse:
+        if state.mode == ServingMode.CLOUD:
+            state.count_request(tenant.tenant_id)
+            if req.features is None:
+                if req.task_id is not None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Cloud mode requires 'features' in request body. "
+                               "'task_id' lookup is not available without SQLite.",
+                    )
+                return FALLBACK_DURATION
+
+            model = state.resolve_model(tenant.tenant_id, "duration")
+            if model is None:
+                return FALLBACK_DURATION
+
+            # Use wrapper to get prediction from resolved model
+            predictor = DurationEstimator.__new__(DurationEstimator)
+            predictor.model = model
+            predictor._trained = True
+            result = predictor.predict(req.features)
+            return DurationResponse(**result)
+
+        # Local mode: unchanged
         if state.duration is None:
             return DurationResponse(estimated_minutes=60.0, confidence_interval=[30.0, 90.0])
 
@@ -187,8 +358,32 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
         result = state.duration.predict(features)
         return DurationResponse(**result)
 
+    # Cloud-safe: QualityRequest.features is required (no task_id lookup path).
+    # QualityEstimator.predict() is purely functional, no DB access.
     @fastapi_app.post("/predict/quality", response_model=QualityResponse)
-    async def predict_quality(req: QualityRequest) -> QualityResponse:
+    async def predict_quality(
+        req: QualityRequest,
+        tenant: TenantContext = Depends(get_tenant),
+    ) -> QualityResponse:
+        if state.mode == ServingMode.CLOUD:
+            state.count_request(tenant.tenant_id)
+            # Quality is rule-based, no per-tenant model needed
+            estimator = QualityEstimator.__new__(QualityEstimator)
+            estimator.weights = {
+                "test_pass_rate": 30,
+                "edit_focus": 20,
+                "velocity_vs_baseline": 20,
+                "commit_frequency": 15,
+                "no_revert_penalty": 15,
+            }
+            result = estimator.predict(req.features)
+            return QualityResponse(
+                score=result["score"],
+                components=result["components"],
+                status=result["status"],
+            )
+
+        # Local mode: unchanged
         if state.quality is None:
             return QualityResponse(score=50, components={}, status="normal")
 
@@ -205,11 +400,26 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
 
     @fastapi_app.post("/train", response_model=TrainResponse)
     async def train(req: TrainRequest, background_tasks: BackgroundTasks) -> TrainResponse:
+        if state.mode == ServingMode.CLOUD:
+            raise HTTPException(
+                status_code=405,
+                detail="Training is not supported in cloud mode. "
+                       "Train models via the training pipeline and deploy weights to storage.",
+            )
+
         if state.training_in_progress:
             return TrainResponse(status="busy", message="Training already in progress")
 
         background_tasks.add_task(_run_training, state)
         return TrainResponse(status="started", message="Training started")
+
+    @fastapi_app.get("/")
+    async def root() -> dict:
+        return {
+            "service": "sigil-ml",
+            "mode": state.mode.value,
+            "version": "0.1.0",
+        }
 
 
 def _run_training(state: AppState) -> None:
