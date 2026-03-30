@@ -59,9 +59,12 @@ select = [
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
+    "B008",   # Depends() in default args — standard FastAPI pattern
     "B905",   # zip without strict= (requires 3.10+, fine for us but noisy)
+    "SIM102", # nested if — explicit guard clauses are clearer for lock patterns
     "SIM105", # contextlib.suppress — try/except pass is clearer in our codebase
     "SIM108", # ternary expression — multi-line if/else is more readable for us
+    "SIM110", # any() instead of for loop — explicit loops are clearer for debugging
 ]
 
 [tool.ruff.lint.isort]

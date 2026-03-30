@@ -11,10 +11,10 @@ from pydantic import BaseModel, Field
 
 from sigil_ml.config import ServingMode
 from sigil_ml.features import extract_duration_features, extract_stuck_features
-from sigil_ml.models.stuck import StuckPredictor
-from sigil_ml.models.workflow import WorkflowStatePredictor
 from sigil_ml.models.duration import DurationEstimator
 from sigil_ml.models.quality import QualityEstimator
+from sigil_ml.models.stuck import StuckPredictor
+from sigil_ml.models.workflow import WorkflowStatePredictor
 from sigil_ml.plugins import fetch_capabilities
 from sigil_ml.tenant import TenantContext, make_tenant_dependency
 from sigil_ml.training.trainer import Trainer
@@ -117,13 +117,9 @@ FALLBACK_SUGGEST = WorkflowStateResponse(
     confidence=0.5,
 )
 
-FALLBACK_DURATION = DurationResponse(
-    estimated_minutes=60.0, confidence_interval=[30.0, 90.0]
-)
+FALLBACK_DURATION = DurationResponse(estimated_minutes=60.0, confidence_interval=[30.0, 90.0])
 
-FALLBACK_QUALITY = QualityResponse(
-    score=50, components={}, status="normal"
-)
+FALLBACK_QUALITY = QualityResponse(score=50, components={}, status="normal")
 
 
 # ---------- Route registration ----------
@@ -144,9 +140,7 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
                 for model_list in tenants.values():
                     all_cached_models.update(model_list)
                 for name in ["stuck", "activity", "workflow", "duration", "quality"]:
-                    models_status[name] = (
-                        "cached" if name in all_cached_models else "on_demand"
-                    )
+                    models_status[name] = "cached" if name in all_cached_models else "on_demand"
             else:
                 for name in ["stuck", "activity", "workflow", "duration", "quality"]:
                     models_status[name] = "not_initialized"
@@ -183,14 +177,8 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
     @fastapi_app.get("/status")
     async def status() -> dict:
         if state.mode == ServingMode.CLOUD:
-            cache_stats = (
-                state.model_cache.stats() if state.model_cache else {}
-            )
-            loaded = (
-                state.model_cache.loaded_tenants()
-                if state.model_cache
-                else {}
-            )
+            cache_stats = state.model_cache.stats() if state.model_cache else {}
+            loaded = state.model_cache.loaded_tenants() if state.model_cache else {}
             return {
                 "mode": "cloud",
                 "cache": cache_stats,
@@ -223,7 +211,7 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
                     raise HTTPException(
                         status_code=400,
                         detail="Cloud mode requires 'features' in request body. "
-                               "'task_id' lookup is not available without SQLite.",
+                        "'task_id' lookup is not available without SQLite.",
                     )
                 return FALLBACK_STUCK
 
@@ -261,8 +249,7 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
             if not classified_events:
                 raise HTTPException(
                     status_code=400,
-                    detail="Cloud mode requires 'classified_events' in request body. "
-                           "Poller buffer is not available.",
+                    detail="Cloud mode requires 'classified_events' in request body. Poller buffer is not available.",
                 )
 
             model = state.resolve_model(tenant.tenant_id, "workflow")
@@ -321,7 +308,7 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
                     raise HTTPException(
                         status_code=400,
                         detail="Cloud mode requires 'features' in request body. "
-                               "'task_id' lookup is not available without SQLite.",
+                        "'task_id' lookup is not available without SQLite.",
                     )
                 return FALLBACK_DURATION
 
@@ -386,7 +373,7 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
             raise HTTPException(
                 status_code=405,
                 detail="Training is not supported in cloud mode. "
-                       "Train models via the training pipeline and deploy weights to storage.",
+                "Train models via the training pipeline and deploy weights to storage.",
             )
 
         if state.training_in_progress:

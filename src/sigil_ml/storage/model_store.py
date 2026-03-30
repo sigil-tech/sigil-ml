@@ -89,9 +89,8 @@ class S3ModelStore:
             from botocore.config import Config as BotoConfig
         except ImportError:
             raise ImportError(
-                "boto3 is required for S3 model storage. "
-                "Install with: pip install sigil-ml[cloud]"
-            )
+                "boto3 is required for S3 model storage. Install with: pip install sigil-ml[cloud]"
+            ) from None
 
         boto_config = BotoConfig(
             connect_timeout=5,
@@ -113,9 +112,7 @@ class S3ModelStore:
         try:
             self._s3.head_bucket(Bucket=self._bucket)
         except Exception as e:
-            raise ValueError(
-                f"S3 bucket '{self._bucket}' is not accessible: {e}"
-            )
+            raise ValueError(f"S3 bucket '{self._bucket}' is not accessible: {e}") from e
 
     def _latest_key(self, model_name: str) -> str:
         return f"{self._tenant_id}/models/{model_name}/latest"
@@ -131,9 +128,7 @@ class S3ModelStore:
             version = resp["Body"].read().decode("utf-8").strip()
 
             # Load the versioned model
-            resp = self._s3.get_object(
-                Bucket=self._bucket, Key=self._versioned_key(model_name, version)
-            )
+            resp = self._s3.get_object(Bucket=self._bucket, Key=self._versioned_key(model_name, version))
             return resp["Body"].read()
         except self._s3.exceptions.NoSuchKey:
             return None
@@ -249,9 +244,7 @@ def model_store_factory(mode: str | None = None) -> ModelStore:
     if resolved_mode == "cloud":
         bucket = config.s3_bucket()
         if not bucket:
-            raise ValueError(
-                "SIGIL_S3_BUCKET environment variable is required in cloud mode"
-            )
+            raise ValueError("SIGIL_S3_BUCKET environment variable is required in cloud mode")
         s3_store = S3ModelStore(
             bucket=bucket,
             tenant_id=config.tenant_id(),

@@ -40,9 +40,7 @@ class DurationEstimator:
                 self.model = None
 
     @classmethod
-    def from_trained_model(
-        cls, model: GradientBoostingRegressor, store: ModelStore | None = None
-    ) -> DurationEstimator:
+    def from_trained_model(cls, model: GradientBoostingRegressor, store: ModelStore | None = None) -> DurationEstimator:
         """Create an instance from an already-trained sklearn model.
 
         Use this instead of ``__new__`` to avoid bypassing ``__init__``.

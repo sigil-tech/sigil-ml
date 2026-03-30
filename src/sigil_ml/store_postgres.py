@@ -30,8 +30,7 @@ class PostgresStore:
             from psycopg2 import sql as pg_sql
         except ImportError:
             raise ImportError(
-                "psycopg2-binary is required for PostgresStore. "
-                "Install with: pip install sigil-ml[cloud]"
+                "psycopg2-binary is required for PostgresStore. Install with: pip install sigil-ml[cloud]"
             ) from None
 
         from sigil_ml.config import validate_tenant_id
@@ -56,16 +55,8 @@ class PostgresStore:
             self._conn = self._psycopg2.connect(self._connection_url)
             self._conn.autocommit = False
             with self._conn.cursor() as cur:
-                cur.execute(
-                    self._sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
-                        self._sql.Identifier(self._tenant)
-                    )
-                )
-                cur.execute(
-                    self._sql.SQL("SET search_path TO {}, public").format(
-                        self._sql.Identifier(self._tenant)
-                    )
-                )
+                cur.execute(self._sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(self._sql.Identifier(self._tenant)))
+                cur.execute(self._sql.SQL("SET search_path TO {}, public").format(self._sql.Identifier(self._tenant)))
             self._conn.commit()
         return self._conn
 
@@ -98,8 +89,27 @@ class PostgresStore:
                 VALUES (1, 0, 0)
                 ON CONFLICT (id) DO NOTHING
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ml_signals (
+                    id               SERIAL PRIMARY KEY,
+                    signal_type      TEXT    NOT NULL,
+                    confidence       REAL    NOT NULL,
+                    evidence         TEXT    NOT NULL,
+                    suggested_action TEXT,
+                    created_at       BIGINT  NOT NULL,
+                    expires_at       BIGINT,
+                    rendered         INTEGER NOT NULL DEFAULT 0,
+                    suggestion_id    INTEGER
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ml_signals_created_at ON ml_signals(created_at)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ml_signals_rendered ON ml_signals(rendered)
+            """)
         conn.commit()
-        logger.info("postgres: ml_cursor table ensured in schema %s", self._tenant)
+        logger.info("postgres: ml_cursor and ml_signals tables ensured in schema %s", self._tenant)
 
     # --- Cursor operations ---
 
@@ -127,8 +137,7 @@ class PostgresStore:
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, kind, source, payload, ts FROM events "
-                "WHERE id > %s ORDER BY id ASC LIMIT %s",
+                "SELECT id, kind, source, payload, ts FROM events WHERE id > %s ORDER BY id ASC LIMIT %s",
                 (since_id, limit),
             )
             columns = ["id", "kind", "source", "payload", "ts"]
@@ -170,8 +179,7 @@ class PostgresStore:
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id FROM tasks WHERE phase != 'idle' "
-                "AND completed_at IS NULL ORDER BY last_active DESC LIMIT 1"
+                "SELECT id FROM tasks WHERE phase != 'idle' AND completed_at IS NULL ORDER BY last_active DESC LIMIT 1"
             )
             row = cur.fetchone()
             return row[0] if row else None
@@ -230,10 +238,7 @@ class PostgresStore:
                 "SELECT id, started_at, completed_at FROM tasks "
                 "WHERE completed_at IS NOT NULL AND started_at IS NOT NULL"
             )
-            return [
-                {"id": row[0], "started_at": row[1], "completed_at": row[2]}
-                for row in cur.fetchall()
-            ]
+            return [{"id": row[0], "started_at": row[1], "completed_at": row[2]} for row in cur.fetchall()]
 
     def count_completed_tasks(self) -> int:
         """Return the count of completed tasks."""
@@ -262,10 +267,7 @@ class PostgresStore:
                 "ORDER BY created_at DESC",
                 (now_ms,),
             )
-            preds = [
-                {"model": row[0], "confidence": row[1], "created_at": row[2]}
-                for row in cur.fetchall()
-            ]
+            preds = [{"model": row[0], "confidence": row[1], "created_at": row[2]} for row in cur.fetchall()]
 
         return {
             "cursor": cursor_data,
@@ -274,9 +276,7 @@ class PostgresStore:
 
     # --- Write operations (ml_predictions, ml_events only) ---
 
-    def insert_prediction(
-        self, model: str, result: dict, confidence: float, ttl_sec: int | None
-    ) -> None:
+    def insert_prediction(self, model: str, result: dict, confidence: float, ttl_sec: int | None) -> None:
         """Insert a row into ml_predictions."""
         conn = self._get_conn()
         now_ms = int(time.time() * 1000)
@@ -288,17 +288,58 @@ class PostgresStore:
                 (model, json.dumps(result), round(confidence, 4), now_ms, expires_ms),
             )
 
-    def insert_ml_event(
-        self, kind: str, endpoint: str, routing: str, latency_ms: int
-    ) -> None:
+    def insert_ml_event(self, kind: str, endpoint: str, routing: str, latency_ms: int) -> None:
         """Insert a row into ml_events."""
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO ml_events (kind, endpoint, routing, latency_ms, ts) "
-                "VALUES (%s, %s, %s, %s, %s)",
+                "INSERT INTO ml_events (kind, endpoint, routing, latency_ms, ts) VALUES (%s, %s, %s, %s, %s)",
                 (kind, endpoint, routing, latency_ms, int(time.time() * 1000)),
             )
+
+    # --- Signal operations ---
+
+    def insert_signal(
+        self,
+        signal_type: str,
+        confidence: float,
+        evidence: dict,
+        suggested_action: str | None = None,
+        ttl_sec: int | None = None,
+    ) -> int:
+        """Insert a signal into ml_signals. Returns the signal ID."""
+        conn = self._get_conn()
+        now_ms = int(time.time() * 1000)
+        expires_ms = (now_ms + ttl_sec * 1000) if ttl_sec else None
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO ml_signals "
+                "(signal_type, confidence, evidence, suggested_action, created_at, expires_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                (signal_type, round(confidence, 4), json.dumps(evidence), suggested_action, now_ms, expires_ms),
+            )
+            row = cur.fetchone()
+            return row[0]
+
+    def get_signal_feedback(self, since_ms: int) -> list[dict]:
+        """Read feedback linkages from suggestions table for training."""
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT s.signal_id, ms.signal_type, s.status, s.created_at "
+                    "FROM suggestions s "
+                    "JOIN ml_signals ms ON s.signal_id = ms.id "
+                    "WHERE s.signal_id IS NOT NULL AND s.created_at > %s "
+                    "ORDER BY s.created_at ASC",
+                    (since_ms,),
+                )
+                return [
+                    {"signal_id": r[0], "signal_type": r[1], "status": r[2], "created_at": r[3]} for r in cur.fetchall()
+                ]
+        except Exception:
+            logger.debug("get_signal_feedback: suggestions.signal_id not available yet")
+            return []
 
     # --- Cloud training methods ---
 
@@ -317,9 +358,7 @@ class PostgresStore:
         """Return completed tasks for a specific tenant."""
         conn = self._get_conn()
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT * FROM tasks WHERE completed_at IS NOT NULL ORDER BY completed_at DESC"
-            )
+            cur.execute("SELECT * FROM tasks WHERE completed_at IS NOT NULL ORDER BY completed_at DESC")
             if cur.description is None:
                 return []
             columns = [desc[0] for desc in cur.description]

@@ -18,7 +18,7 @@ class DataStore(Protocol):
     """Protocol for all data access operations in sigil-ml.
 
     Implementations: SqliteStore (local), PostgresStore (cloud).
-    Python only writes to ml_predictions, ml_events, ml_cursor.
+    Python only writes to ml_predictions, ml_events, ml_cursor, ml_signals.
     Python only reads from events, tasks, patterns, suggestions.
     """
 
@@ -84,16 +84,48 @@ class DataStore(Protocol):
         """Return cursor info and latest non-expired predictions for the /status endpoint."""
         ...
 
-    def insert_prediction(
-        self, model: str, result: dict, confidence: float, ttl_sec: int | None
-    ) -> None:
+    def insert_prediction(self, model: str, result: dict, confidence: float, ttl_sec: int | None) -> None:
         """Insert a row into ml_predictions."""
         ...
 
-    def insert_ml_event(
-        self, kind: str, endpoint: str, routing: str, latency_ms: int
-    ) -> None:
+    def insert_ml_event(self, kind: str, endpoint: str, routing: str, latency_ms: int) -> None:
         """Insert a row into ml_events."""
+        ...
+
+    def insert_signal(
+        self,
+        signal_type: str,
+        confidence: float,
+        evidence: dict,
+        suggested_action: str | None = None,
+        ttl_sec: int | None = None,
+    ) -> int:
+        """Insert a signal into ml_signals. Returns the signal ID.
+
+        Args:
+            signal_type: Model-generated type (e.g., "velocity_deviation").
+            confidence: Model's confidence score (0.0 to 1.0).
+            evidence: Structured JSON evidence for LLM rendering.
+            suggested_action: Optional generic action hint (e.g., "test", "commit").
+            ttl_sec: Optional time-to-live in seconds. None = no expiry.
+
+        Returns:
+            The auto-generated integer ID of the inserted signal.
+        """
+        ...
+
+    def get_signal_feedback(self, since_ms: int) -> list[dict]:
+        """Read feedback linkages from suggestions table for training.
+
+        Returns rows where a suggestion was linked to an ml_signal
+        (via signal_id column) and has a status of accepted/dismissed/ignored.
+
+        Args:
+            since_ms: Only return feedback newer than this Unix ms timestamp.
+
+        Returns:
+            List of dicts with keys: signal_id, signal_type, status, created_at.
+        """
         ...
 
     def commit(self) -> None:
@@ -150,9 +182,7 @@ def create_store(mode: str | None = None) -> DataStore:
 
         url = config.postgres_url()
         if not url:
-            raise ValueError(
-                "SIGIL_POSTGRES_URL environment variable is required in cloud mode"
-            )
+            raise ValueError("SIGIL_POSTGRES_URL environment variable is required in cloud mode")
         tenant = config.tenant_id()
         return PostgresStore(connection_url=url, tenant=tenant)
 

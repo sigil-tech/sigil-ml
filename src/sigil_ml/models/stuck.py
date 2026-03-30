@@ -42,9 +42,7 @@ class StuckPredictor:
                 self.model = None
 
     @classmethod
-    def from_trained_model(
-        cls, model: GradientBoostingClassifier, store: ModelStore | None = None
-    ) -> StuckPredictor:
+    def from_trained_model(cls, model: GradientBoostingClassifier, store: ModelStore | None = None) -> StuckPredictor:
         """Create an instance from an already-trained sklearn model.
 
         Use this instead of ``__new__`` to avoid bypassing ``__init__``.

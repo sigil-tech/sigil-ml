@@ -71,9 +71,7 @@ class ModelCache:
             self._hits += 1
             return entry.model
 
-    def put(
-        self, tenant_id: str, model_name: str, model: Any
-    ) -> None:
+    def put(self, tenant_id: str, model_name: str, model: Any) -> None:
         """Store a model in the cache.
 
         If the cache is at capacity and the key is new, the oldest
@@ -111,10 +109,7 @@ class ModelCache:
         """
         now = time.monotonic()
         with self._lock:
-            expired = [
-                k for k, v in self._entries.items()
-                if (now - v.loaded_at) >= self._ttl_seconds
-            ]
+            expired = [k for k, v in self._entries.items() if (now - v.loaded_at) >= self._ttl_seconds]
             for k in expired:
                 del self._entries[k]
             self._evictions += len(expired)
@@ -154,9 +149,7 @@ class ModelCache:
         """
         if not self._entries:
             return
-        oldest_key = min(
-            self._entries, key=lambda k: self._entries[k].loaded_at
-        )
+        oldest_key = min(self._entries, key=lambda k: self._entries[k].loaded_at)
         del self._entries[oldest_key]
         self._evictions += 1
         logger.debug("cache: evicted oldest entry %s", oldest_key)
@@ -169,11 +162,7 @@ def create_model_cache() -> ModelCache:
         MODEL_CACHE_TTL_SECONDS: TTL in seconds (default 300).
         MODEL_CACHE_MAX_SIZE: Maximum entries (default 100).
     """
-    ttl = float(
-        os.environ.get("MODEL_CACHE_TTL_SECONDS", str(DEFAULT_TTL_SECONDS))
-    )
-    max_size = int(
-        os.environ.get("MODEL_CACHE_MAX_SIZE", str(DEFAULT_MAX_SIZE))
-    )
+    ttl = float(os.environ.get("MODEL_CACHE_TTL_SECONDS", str(DEFAULT_TTL_SECONDS)))
+    max_size = int(os.environ.get("MODEL_CACHE_MAX_SIZE", str(DEFAULT_MAX_SIZE)))
     logger.info("cache: created with ttl=%.0fs, max_size=%d", ttl, max_size)
     return ModelCache(ttl_seconds=ttl, max_size=max_size)

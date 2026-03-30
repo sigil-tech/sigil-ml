@@ -105,9 +105,7 @@ class ActivityClassifier:
                 self._ml_model = None
 
     @classmethod
-    def from_trained_model(
-        cls, model: SGDClassifier, store: ModelStore | None = None
-    ) -> ActivityClassifier:
+    def from_trained_model(cls, model: SGDClassifier, store: ModelStore | None = None) -> ActivityClassifier:
         """Create an instance from an already-trained sklearn model.
 
         Use this instead of ``__new__`` to avoid bypassing ``__init__``.

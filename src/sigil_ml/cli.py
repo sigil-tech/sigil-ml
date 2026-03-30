@@ -160,15 +160,13 @@ def _handle_cloud_training(args: argparse.Namespace) -> None:
     s3_bucket = os.environ.get("SIGIL_S3_BUCKET")
     if not db_url or not s3_bucket:
         print(
-            "Error: SIGIL_POSTGRES_URL and SIGIL_S3_BUCKET environment variables "
-            "are required for cloud mode",
+            "Error: SIGIL_POSTGRES_URL and SIGIL_S3_BUCKET environment variables are required for cloud mode",
             file=sys.stderr,
         )
         sys.exit(1)
 
     # Construct stores from config (lazy imports)
     from sigil_ml.training.cloud_trainer import CloudTrainer
-    from sigil_ml.training.models import CloudTrainingConfig
 
     data_store = _create_data_store(db_url)
     model_store = _create_model_store(s3_bucket)
@@ -196,18 +194,18 @@ def _handle_cloud_training(args: argparse.Namespace) -> None:
         if use_compact_json:
             print(json.dumps(batch.to_dict()))
         else:
-            print(f"\n=== Batch Training Summary ===")
+            print("\n=== Batch Training Summary ===")
             print(f"Total tenants: {batch.total}")
             print(f"  Trained: {batch.trained}")
             print(f"  Skipped: {batch.skipped}")
             print(f"  Failed:  {batch.failed}")
             print(f"Duration: {batch.total_duration_ms}ms")
             if batch.failed > 0:
-                print(f"\nFailed tenants:")
+                print("\nFailed tenants:")
                 for run in batch.runs:
                     if run.status == "failed":
                         print(f"  - {run.tenant_id}: {run.error}")
-            print(f"\nFull JSON:")
+            print("\nFull JSON:")
             print(json.dumps(batch.to_dict(), indent=2))
         sys.exit(0 if batch.failed == 0 else 1)
 
@@ -216,14 +214,14 @@ def _handle_cloud_training(args: argparse.Namespace) -> None:
         if use_compact_json:
             print(json.dumps(result.to_dict()))
         else:
-            print(f"\n=== Aggregate Training Summary ===")
+            print("\n=== Aggregate Training Summary ===")
             print(f"Status: {result.status}")
             print(f"Samples: {result.sample_count}")
             print(f"Models trained: {', '.join(result.models_trained) or 'none'}")
             print(f"Duration: {result.duration_ms}ms")
             if result.error:
                 print(f"Note: {result.error}")
-            print(f"\nFull JSON:")
+            print("\nFull JSON:")
             print(json.dumps(result.to_dict(), indent=2))
         sys.exit(0 if result.status != "failed" else 1)
 
@@ -231,23 +229,20 @@ def _handle_cloud_training(args: argparse.Namespace) -> None:
 def _create_data_store(db_url: str) -> object:
     """Create a DataStore from the Postgres URL."""
     try:
-        from sigil_ml.store_postgres import PostgresStore
         from sigil_ml import config
+        from sigil_ml.store_postgres import PostgresStore
 
         tenant = config.tenant_id()
         return PostgresStore(connection_url=db_url, tenant=tenant)
     except ImportError:
-        raise SystemExit(
-            "Error: PostgresStore not available. "
-            "Install with: pip install sigil-ml[cloud]"
-        )
+        raise SystemExit("Error: PostgresStore not available. Install with: pip install sigil-ml[cloud]") from None
 
 
 def _create_model_store(s3_bucket_name: str) -> object:
     """Create a ModelStore from the S3 bucket config."""
     try:
-        from sigil_ml.storage.model_store import S3ModelStore
         from sigil_ml import config
+        from sigil_ml.storage.model_store import S3ModelStore
 
         return S3ModelStore(
             bucket=s3_bucket_name,
@@ -256,10 +251,7 @@ def _create_model_store(s3_bucket_name: str) -> object:
             region=config.aws_region(),
         )
     except ImportError:
-        raise SystemExit(
-            "Error: S3ModelStore not available. "
-            "Install with: pip install sigil-ml[cloud]"
-        )
+        raise SystemExit("Error: S3ModelStore not available. Install with: pip install sigil-ml[cloud]") from None
 
 
 def _build_cloud_training_config(
@@ -274,9 +266,7 @@ def _build_cloud_training_config(
         min_interval_sec=min_interval
         if min_interval is not None
         else int(os.environ.get("SIGIL_ML_TRAIN_MIN_INTERVAL", "3600")),
-        min_tasks=min_tasks
-        if min_tasks is not None
-        else int(os.environ.get("SIGIL_ML_TRAIN_MIN_TASKS", "10")),
+        min_tasks=min_tasks if min_tasks is not None else int(os.environ.get("SIGIL_ML_TRAIN_MIN_TASKS", "10")),
         max_tasks_per_tenant=max_tasks_per_tenant
         if max_tasks_per_tenant is not None
         else int(os.environ.get("SIGIL_ML_TRAIN_MAX_TASKS_PER_TENANT", "1000")),

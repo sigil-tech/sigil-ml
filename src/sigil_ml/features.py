@@ -336,9 +336,7 @@ def extract_workflow_features(classified_events: list[dict], session_info: dict)
 # ---------------------------------------------------------------------------
 
 
-def extract_stuck_features_from_data(
-    task: dict[str, Any], events: list[dict[str, Any]]
-) -> dict[str, float]:
+def extract_stuck_features_from_data(task: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, float]:
     """Extract stuck features from pre-queried task and events data.
 
     Same output as extract_stuck_features() but operates on passed-in
@@ -389,9 +387,7 @@ def extract_stuck_features_from_data(
     }
 
 
-def extract_duration_features_from_data(
-    task: dict[str, Any], events: list[dict[str, Any]]
-) -> dict[str, float]:
+def extract_duration_features_from_data(task: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, float]:
     """Extract duration features from pre-queried data.
 
     Same output as extract_duration_features() but operates on passed-in
@@ -407,9 +403,7 @@ def extract_duration_features_from_data(
     file_count = float(len(files_map)) if isinstance(files_map, dict) else 0.0
 
     # Total edits from events
-    total_edits = float(
-        len([e for e in events if e.get("kind") in ("edit", "file_edit", "save")])
-    )
+    total_edits = float(len([e for e in events if e.get("kind") in ("edit", "file_edit", "save")]))
 
     # Time of day
     started_at = task.get("started_at")
@@ -428,3 +422,56 @@ def extract_duration_features_from_data(
         "time_of_day_hour": float(hour),
         "branch_name_length": branch_name_length,
     }
+
+
+# --- Composite action token extraction (for signal pipeline) ---
+
+
+def extract_action_token(event: dict) -> str:
+    """Convert a classified event into a composite action token.
+
+    Format: "{category}:{tool}" when tool is identifiable,
+            "{category}" when tool is unknown.
+
+    Examples: "verifying:pytest", "editing:py", "integrating:git"
+    """
+    category = event.get("_category", "idle")
+    tool = infer_tool(event)
+    return f"{category}:{tool}" if tool else category
+
+
+def infer_tool(event: dict) -> str | None:
+    """Infer the specific tool from an event's payload.
+
+    Returns:
+        Tool identifier string, or None if cannot be determined.
+    """
+    kind = event.get("kind", "")
+    payload = event.get("payload") or {}
+    if isinstance(payload, str):
+        return None
+
+    if kind == "terminal":
+        cmd = str(payload.get("cmd", "")).strip().split()
+        if cmd:
+            return cmd[0].split("/")[-1]
+        return None
+
+    if kind == "process":
+        comm = str(payload.get("comm", "")).split("/")[-1].strip("()")
+        return comm if comm else None
+
+    if kind == "git":
+        return "git"
+
+    if kind == "file":
+        path = str(payload.get("path", ""))
+        if "." in path:
+            return path.rsplit(".", 1)[-1].lower()
+        return "unknown"
+
+    if kind == "ai":
+        source = event.get("source", "")
+        return source if source else "ai"
+
+    return None

@@ -10,7 +10,10 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sigil_ml.signals.engine import SignalEngine
 
 from sigil_ml.features import (
     extract_duration_features,
@@ -32,13 +35,14 @@ QUALITY_TTL_SEC = 120  # 2-minute expiry for quality
 class EventPoller:
     """Polls sigild's events table and writes predictions to ml_predictions."""
 
-    def __init__(self, store: DataStore, models: dict[str, Any]) -> None:
+    def __init__(self, store: DataStore, models: dict[str, Any], signal_engine: SignalEngine | None = None) -> None:
         self.store = store
         self.stuck = models["stuck"]
         self.activity = models["activity"]
         self.workflow = models["workflow"]
         self.duration = models["duration"]
         self.quality = models["quality"]
+        self.signal_engine = signal_engine  # Optional: None when not configured
         self._buffer: list[dict] = []
         self._since_last_predict = 0
         self._last_predict_time = 0.0
@@ -97,6 +101,15 @@ class EventPoller:
 
         self.store.commit()
 
+        # --- Signal detection (additive, does not affect predictions) ---
+        if self.signal_engine is not None:
+            try:
+                task_id = self.store.get_active_task()
+                task_context = {"task_id": task_id} if task_id else None
+                self.signal_engine.process_events(self._buffer, task_context)
+            except Exception:
+                logger.debug("poller: signal engine error (non-fatal)", exc_info=True)
+
     # Fallback predictions for untrained models.
     _FALLBACK_STUCK = {"probability": 0.5, "confidence": "weak"}
     _FALLBACK_WORKFLOW = {
@@ -135,7 +148,9 @@ class EventPoller:
 
         # Activity summary — classify and summarize the buffer.
         activity_result = self._activity_summary()
-        self.store.insert_prediction("activity", activity_result, activity_result.get("confidence", 0.5), PREDICTION_TTL_SEC)
+        self.store.insert_prediction(
+            "activity", activity_result, activity_result.get("confidence", 0.5), PREDICTION_TTL_SEC
+        )
 
         # Workflow state prediction — replaces old suggestion policy.
         session_info = self._session_info(task_id)
@@ -161,6 +176,16 @@ class EventPoller:
         qfeats = self._quality_features()
         result = self.quality.predict(qfeats)
         self.store.insert_prediction("quality", result, result.get("score", 50) / 100.0, QUALITY_TTL_SEC)
+
+        # Write behavior profile (signal pipeline)
+        if self.signal_engine is not None:
+            try:
+                profile_data = self.signal_engine.profile.to_dict()
+                self.store.insert_prediction("profile", profile_data, 1.0, None)
+                # Refresh dismissed signal types while we're here
+                self.signal_engine.refresh_dismissed_types()
+            except Exception:
+                logger.debug("poller: profile write failed (non-fatal)", exc_info=True)
 
         # Audit log
         latency_ms = int((time.time() - start) * 1000)

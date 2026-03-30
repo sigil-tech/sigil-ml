@@ -83,9 +83,7 @@ class DataStoreTrainingLock:
             )
         except AttributeError:
             # DataStore doesn't support locking -- treat as acquired
-            logger.debug(
-                "DataStore does not support training locks, proceeding without lock"
-            )
+            logger.debug("DataStore does not support training locks, proceeding without lock")
             return True
 
         if acquired:

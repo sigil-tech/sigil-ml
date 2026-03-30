@@ -53,6 +53,7 @@ class FilesystemModelLoader:
         """
         if base_dir is None:
             from sigil_ml import config
+
             base_dir = config.models_dir()
         self._base_dir = base_dir
 
@@ -72,31 +73,28 @@ class FilesystemModelLoader:
         if shared_path.exists():
             logger.info(
                 "loader: using shared model for %s/%s",
-                tenant_id, model_name,
+                tenant_id,
+                model_name,
             )
             return self._safe_load(shared_path, tenant_id, model_name)
 
-        logger.debug(
-            "loader: no model found for %s/%s", tenant_id, model_name
-        )
+        logger.debug("loader: no model found for %s/%s", tenant_id, model_name)
         return None
 
-    def _safe_load(
-        self, path: Path, tenant_id: str, model_name: str
-    ) -> Any | None:
+    def _safe_load(self, path: Path, tenant_id: str, model_name: str) -> Any | None:
         """Load a joblib file with error handling."""
         import joblib
 
         try:
             model = joblib.load(path)
-            logger.info(
-                "loader: loaded %s/%s from %s", tenant_id, model_name, path
-            )
+            logger.info("loader: loaded %s/%s from %s", tenant_id, model_name, path)
             return model
         except Exception:
             logger.warning(
                 "loader: failed to load %s/%s from %s",
-                tenant_id, model_name, path,
+                tenant_id,
+                model_name,
+                path,
                 exc_info=True,
             )
             return None

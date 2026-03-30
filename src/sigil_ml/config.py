@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 import os
+import re
 from pathlib import Path
 
 
@@ -35,9 +36,7 @@ def resolve_mode(cli_mode: str | None = None) -> ServingMode:
     try:
         return ServingMode(raw.strip().lower())
     except ValueError:
-        raise SystemExit(
-            f"Invalid serving mode: {raw!r}. Must be 'local' or 'cloud'."
-        )
+        raise SystemExit(f"Invalid serving mode: {raw!r}. Must be 'local' or 'cloud'.") from None
 
 
 def _data_home() -> Path:
@@ -121,8 +120,6 @@ def model_cache_ttl() -> float:
     """Return the model cache TTL in seconds. Default 300."""
     return float(os.environ.get("SIGIL_MODEL_CACHE_TTL", "300"))
 
-
-import re
 
 _TENANT_ID_RE = re.compile(r"^[a-z0-9_-]{1,63}$")
 

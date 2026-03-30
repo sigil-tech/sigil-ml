@@ -27,7 +27,7 @@
 ### Invariants
 
 1. Every SQLite connection Python opens must set `PRAGMA journal_mode=WAL` and `PRAGMA busy_timeout=5000`
-2. Model names in `ml_predictions.model` must exactly match Go's queries: `"stuck"`, `"suggest"`, `"duration"`, `"quality"`
+2. Model names in `ml_predictions.model` must exactly match Go's queries: `"stuck"`, `"suggest"`, `"duration"`, `"quality"`, `"profile"`
 3. The HTTP endpoints on `:7774` must remain functional — `sigilctl` uses them
 4. No heavyweight dependencies — `scikit-learn`, `numpy`, `fastapi`, `uvicorn`, `joblib` only
 

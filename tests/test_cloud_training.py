@@ -15,13 +15,12 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 
 from sigil_ml.training.models import (
@@ -94,12 +93,14 @@ class MockDataStore:
         return list(self._opted_in_tenants)
 
     def record_training_run(self, tenant_id: str, status: str, duration_ms: int) -> None:
-        self._ml_events.append({
-            "kind": "training",
-            "endpoint": "cloud_trainer",
-            "routing": tenant_id,
-            "latency_ms": duration_ms,
-        })
+        self._ml_events.append(
+            {
+                "kind": "training",
+                "endpoint": "cloud_trainer",
+                "routing": tenant_id,
+                "latency_ms": duration_ms,
+            }
+        )
 
     # Existing DataStore protocol methods (fallback path)
     def get_completed_task_ids(self) -> list[str]:
@@ -120,12 +121,14 @@ class MockDataStore:
         return list(self._events.get(task_id, []))
 
     def insert_ml_event(self, kind: str, endpoint: str, routing: str, latency_ms: int) -> None:
-        self._ml_events.append({
-            "kind": kind,
-            "endpoint": endpoint,
-            "routing": routing,
-            "latency_ms": latency_ms,
-        })
+        self._ml_events.append(
+            {
+                "kind": kind,
+                "endpoint": endpoint,
+                "routing": routing,
+                "latency_ms": latency_ms,
+            }
+        )
 
     def commit(self) -> None:
         pass
@@ -185,19 +188,21 @@ def _make_tasks(n: int, tenant_id: str = "t1") -> list[dict]:
             test_fails = 5  # > 3, so stuck heuristic fires
         else:
             test_fails = 0  # not stuck
-        tasks.append({
-            "id": f"{tenant_id}-task-{i}",
-            "repo_root": "/tmp/repo",
-            "branch": "feature/test",
-            "phase": "done",
-            "files": json.dumps({"main.py": 5}),
-            "started_at": now_ms - 3600_000,
-            "last_active": now_ms - 60_000,
-            "completed_at": now_ms - 60_000,
-            "commit_count": 2,
-            "test_runs": 5,
-            "test_fails": test_fails,
-        })
+        tasks.append(
+            {
+                "id": f"{tenant_id}-task-{i}",
+                "repo_root": "/tmp/repo",
+                "branch": "feature/test",
+                "phase": "done",
+                "files": json.dumps({"main.py": 5}),
+                "started_at": now_ms - 3600_000,
+                "last_active": now_ms - 60_000,
+                "completed_at": now_ms - 60_000,
+                "commit_count": 2,
+                "test_runs": 5,
+                "test_fails": test_fails,
+            }
+        )
     return tasks
 
 
@@ -261,9 +266,7 @@ class TestTrainingRun:
         assert d["started_at"].endswith("+00:00")
 
     def test_to_dict_with_data_freshness(self) -> None:
-        run = TrainingRun(
-            tenant_id="t1", status="trained", data_freshness_sec=45.2
-        )
+        run = TrainingRun(tenant_id="t1", status="trained", data_freshness_sec=45.2)
         d = run.to_dict()
         assert d["data_freshness_sec"] == 45.2
 
@@ -294,26 +297,30 @@ class TestTrainingBatch:
         assert batch.failed == 0
 
     def test_counts(self) -> None:
-        batch = TrainingBatch(runs=[
-            TrainingRun(tenant_id="t1", status="trained"),
-            TrainingRun(tenant_id="t2", status="trained"),
-            TrainingRun(tenant_id="t3", status="skipped"),
-            TrainingRun(tenant_id="t4", status="skipped_locked"),
-            TrainingRun(tenant_id="t5", status="failed"),
-        ])
+        batch = TrainingBatch(
+            runs=[
+                TrainingRun(tenant_id="t1", status="trained"),
+                TrainingRun(tenant_id="t2", status="trained"),
+                TrainingRun(tenant_id="t3", status="skipped"),
+                TrainingRun(tenant_id="t4", status="skipped_locked"),
+                TrainingRun(tenant_id="t5", status="failed"),
+            ]
+        )
         assert batch.total == 5
         assert batch.trained == 2
         assert batch.skipped == 2  # skipped + skipped_locked
         assert batch.failed == 1
 
     def test_status_breakdown(self) -> None:
-        batch = TrainingBatch(runs=[
-            TrainingRun(tenant_id="t1", status="trained"),
-            TrainingRun(tenant_id="t2", status="skipped"),
-            TrainingRun(tenant_id="t3", status="skipped_locked"),
-            TrainingRun(tenant_id="t4", status="failed"),
-            TrainingRun(tenant_id="t5", status="trained"),
-        ])
+        batch = TrainingBatch(
+            runs=[
+                TrainingRun(tenant_id="t1", status="trained"),
+                TrainingRun(tenant_id="t2", status="skipped"),
+                TrainingRun(tenant_id="t3", status="skipped_locked"),
+                TrainingRun(tenant_id="t4", status="failed"),
+                TrainingRun(tenant_id="t5", status="trained"),
+            ]
+        )
         breakdown = batch.status_breakdown
         assert breakdown["trained"] == 2
         assert breakdown["skipped"] == 1
@@ -962,9 +969,7 @@ class TestObservability:
         trainer.train_all_tenants()
 
         # Should have per-tenant + batch-level events
-        batch_events = [
-            e for e in data_store._ml_events if e["kind"] == "batch_training"
-        ]
+        batch_events = [e for e in data_store._ml_events if e["kind"] == "batch_training"]
         assert len(batch_events) == 1
         assert batch_events[0]["routing"] == "__batch__"
 
@@ -1083,7 +1088,7 @@ class TestCLICloudFlags:
         import subprocess
 
         result = subprocess.run(
-            [".venv/bin/python", "-m", "sigil_ml.cli", "train", "--mode", "cloud"],
+            [sys.executable, "-m", "sigil_ml.cli", "train", "--mode", "cloud"],
             capture_output=True,
             text=True,
         )
@@ -1096,9 +1101,15 @@ class TestCLICloudFlags:
 
         result = subprocess.run(
             [
-                ".venv/bin/python", "-m", "sigil_ml.cli",
-                "train", "--mode", "cloud",
-                "--tenant", "t1", "--all-tenants",
+                sys.executable,
+                "-m",
+                "sigil_ml.cli",
+                "train",
+                "--mode",
+                "cloud",
+                "--tenant",
+                "t1",
+                "--all-tenants",
             ],
             capture_output=True,
             text=True,
@@ -1113,8 +1124,14 @@ class TestCLICloudFlags:
         env = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")}
         result = subprocess.run(
             [
-                ".venv/bin/python", "-m", "sigil_ml.cli",
-                "train", "--mode", "cloud", "--tenant", "t1",
+                sys.executable,
+                "-m",
+                "sigil_ml.cli",
+                "train",
+                "--mode",
+                "cloud",
+                "--tenant",
+                "t1",
             ],
             capture_output=True,
             text=True,
@@ -1128,7 +1145,7 @@ class TestCLICloudFlags:
         import subprocess
 
         result = subprocess.run(
-            [".venv/bin/python", "-m", "sigil_ml.cli", "train", "--help"],
+            [sys.executable, "-m", "sigil_ml.cli", "train", "--help"],
             capture_output=True,
             text=True,
         )

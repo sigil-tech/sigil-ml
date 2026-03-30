@@ -1,5 +1,7 @@
 """Generate synthetic training data from known heuristic patterns."""
 
+from __future__ import annotations
+
 import numpy as np
 
 
@@ -88,3 +90,66 @@ def generate_duration_data(n: int = 500) -> tuple[np.ndarray, np.ndarray]:
     y = np.clip(y, 10, 180)
 
     return X, y
+
+
+def generate_next_action_data(n: int = 500) -> list[list[str]]:
+    """Generate synthetic event token sequences for n-gram cold start.
+
+    Returns:
+        List of token sequences (each a list of composite action tokens).
+    """
+    import random
+
+    rng = random.Random(42)
+
+    # Common workflow patterns
+    patterns = [
+        ["editing:py", "editing:py", "verifying:pytest", "integrating:git"],
+        ["editing:go", "editing:go", "verifying:go", "integrating:git"],
+        ["editing:js", "editing:js", "verifying:jest", "integrating:git"],
+        ["researching:ai", "editing:py", "editing:py", "verifying:pytest"],
+        ["navigating", "editing:py", "editing:py", "editing:py", "verifying:pytest"],
+    ]
+
+    sequences: list[list[str]] = []
+    for _ in range(n):
+        base = rng.choice(patterns)
+        # Add some noise: occasionally insert extra editing or navigating
+        seq = []
+        for token in base:
+            seq.append(token)
+            if rng.random() < 0.2:
+                seq.append(rng.choice(["editing:py", "navigating", "idle"]))
+        sequences.append(seq)
+
+    return sequences
+
+
+def generate_file_cooccurrence_data(n_tasks: int = 50, n_files: int = 20) -> list[set[str]]:
+    """Generate synthetic file co-occurrence data for cold start.
+
+    Returns:
+        List of file sets (each representing files edited in one task).
+    """
+    import random
+
+    rng = random.Random(42)
+
+    # Create file clusters that tend to co-occur
+    files = [f"src/module_{i}.py" for i in range(n_files)]
+    clusters = [
+        set(files[0:4]),  # cluster 1
+        set(files[4:8]),  # cluster 2
+        set(files[8:12]),  # cluster 3
+    ]
+
+    tasks: list[set[str]] = []
+    for _ in range(n_tasks):
+        cluster = rng.choice(clusters)
+        # Select 2-4 files from the cluster, plus occasional cross-cluster file
+        task_files = set(rng.sample(sorted(cluster), min(rng.randint(2, 4), len(cluster))))
+        if rng.random() < 0.15:
+            task_files.add(rng.choice(files))
+        tasks.append(task_files)
+
+    return tasks
