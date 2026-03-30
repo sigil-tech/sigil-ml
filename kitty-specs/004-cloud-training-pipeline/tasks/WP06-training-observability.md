@@ -19,11 +19,11 @@ shell_pid: ''
 review_status: ''
 reviewed_by: ''
 history:
-- timestamp: '2026-03-29T16:29:51Z'
+- timestamp: '2026-03-30T01:45:09Z'
   lane: planned
   agent: system
   shell_pid: ''
-  action: Prompt generated via /spec-kitty.tasks
+  action: Prompt regenerated via /spec-kitty.tasks
 requirement_refs:
 - FR-008
 - FR-009
@@ -31,7 +31,7 @@ requirement_refs:
 
 # Work Package Prompt: WP06 -- Training Observability & Structured Output
 
-## Important: Review Feedback Status
+## IMPORTANT: Review Feedback Status
 
 **Read this first if you are implementing this task!**
 
@@ -61,283 +61,272 @@ Use language identifiers in code blocks: ````python`, ````bash`
 spec-kitty implement WP06 --base WP03
 ```
 
-Depends on WP01 (TrainingRun/TrainingSummary dataclasses) and WP03 (batch training produces summary to format).
+Depends on WP01 (TrainingRun/TrainingSummary dataclasses) and WP03 (batch training produces TrainingBatch to format).
 
 ---
 
 ## Objectives & Success Criteria
 
-- Training output is structured JSON, parseable by monitoring systems (FR-008)
-- Per-tenant status includes: tenant_id, status, sample_count, models_trained, duration_sec, error_message
-- Batch training produces a summary with trained/skipped/failed breakdowns
-- Aggregate training produces a summary with pooled tenant count
-- All training runs record audit events via DataStore (FR-009)
-- CLI detects TTY vs pipe for formatting (pretty-print vs compact JSON)
+1. Training output is structured JSON, parseable by monitoring systems (FR-008).
+2. Per-tenant status includes: tenant_id, status, sample_count, models_trained, duration_ms, error (nullable).
+3. Batch training produces a JSON summary with trained/skipped/failed breakdowns and per-tenant details.
+4. Aggregate training produces a JSON summary with opt-in tenant count and total samples.
+5. All training runs record audit events to `ml_training_runs` table via DataStore (FR-009).
+6. CLI detects TTY vs pipe for output formatting: pretty-print for terminal, compact JSON for pipes.
+7. A `--json` flag forces compact JSON regardless of TTY detection.
 
 ## Context & Constraints
 
-- **Spec**: `kitty-specs/004-cloud-training-pipeline/spec.md` -- User Story 5 (Training Observability), FR-008, FR-009
-- **WP01 artifacts**: `TrainingRun` and `TrainingSummary` dataclasses with `to_dict()` and `to_json()` methods
-- **WP03 artifacts**: `train_all_tenants()` returns a `TrainingSummary`
-- **Existing pattern**: `TrainingScheduler._log_retrain()` records audit events to `ml_events` table
-- **Output strategy**: Structured output (JSON) goes to stdout; log messages go to stderr. This allows piping JSON output while still seeing operational logs.
+- **Spec**: User Story 5 (Training Observability), FR-008, FR-009
+- **WP01 artifacts**: `TrainingRun` and `TrainingBatch` dataclasses with `to_dict()` and `to_json()` methods.
+- **WP03 artifacts**: `train_all_tenants()` returns a `TrainingBatch`.
+- **Existing pattern**: `TrainingScheduler._log_retrain()` in `training/scheduler.py` records audit events to the `ml_events` table. Cloud training should follow a compatible pattern.
+- **Output strategy**: Structured JSON goes to stdout; log/diagnostic messages go to stderr. This allows piping: `sigil-ml train ... | jq .` while still seeing operational logs.
+- **JSON Lines**: For K8s log collection, cloud training should emit JSON Lines format (one JSON object per line) for real-time streaming events.
 
 ---
 
 ## Subtasks & Detailed Guidance
 
-### Subtask T029 -- Enhance TrainingRun and TrainingSummary dataclasses
+### Subtask T029 -- Enhance TrainingRun and TrainingBatch Dataclasses
 
-- **Purpose**: Ensure the dataclasses contain all fields needed for comprehensive observability.
+- **Purpose**: Ensure the dataclasses contain all fields needed for comprehensive observability output per FR-008.
 - **Steps**:
   1. Review and enhance `TrainingRun` in `training/models.py`:
      ```python
      @dataclass
      class TrainingRun:
          tenant_id: str
-         status: str  # trained, trained_synthetic, skipped_interval, skipped_threshold, skipped_locked, failed
-         sample_count: int = 0
+         status: str
          models_trained: list[str] = field(default_factory=list)
-         duration_sec: float = 0.0
-         error_message: str | None = None
+         sample_count: int = 0
+         duration_ms: int = 0
+         error: str | None = None
+         started_at: datetime | None = None
+         completed_at: datetime | None = None
          # Observability additions:
-         started_at: str | None = None  # ISO 8601 timestamp
-         completed_at: str | None = None  # ISO 8601 timestamp
-         data_freshness_sec: float | None = None  # seconds since newest training data
+         data_freshness_sec: float | None = None  # seconds since newest training event
      ```
-  2. Review and enhance `TrainingSummary`:
+  2. Enhance `TrainingBatch`:
      ```python
      @dataclass
-     class TrainingSummary:
-         mode: str  # batch, aggregate, single
-         total_tenants: int = 0
-         trained: int = 0
-         skipped: int = 0
-         failed: int = 0
-         total_duration_sec: float = 0.0
+     class TrainingBatch:
          runs: list[TrainingRun] = field(default_factory=list)
-         # Observability additions:
-         started_at: str | None = None  # ISO 8601
-         completed_at: str | None = None  # ISO 8601
-         status_breakdown: dict[str, int] = field(default_factory=dict)
+         total_duration_ms: int = 0
+         started_at: datetime | None = None
+         completed_at: datetime | None = None
+
+         @property
+         def status_breakdown(self) -> dict[str, int]:
+             """Count runs by status for monitoring dashboards."""
+             counts: dict[str, int] = {}
+             for run in self.runs:
+                 counts[run.status] = counts.get(run.status, 0) + 1
+             return counts
      ```
-  3. Update `to_dict()` methods to include the new fields
-  4. Add a convenience method to compute status_breakdown from runs:
+  3. Update `to_dict()` methods to include new fields:
      ```python
-     def compute_status_breakdown(self) -> None:
-         self.status_breakdown = {}
-         for run in self.runs:
-             self.status_breakdown[run.status] = self.status_breakdown.get(run.status, 0) + 1
+     # TrainingRun.to_dict():
+     if self.data_freshness_sec is not None:
+         d["data_freshness_sec"] = self.data_freshness_sec
+
+     # TrainingBatch.to_dict():
+     d["status_breakdown"] = self.status_breakdown
      ```
-- **Files**: `src/sigil_ml/training/models.py`
+  4. Ensure ISO 8601 timestamps in JSON output for `started_at`/`completed_at`.
+- **Files**: `src/sigil_ml/training/models.py` (modify, ~20 lines)
 - **Parallel?**: Yes -- dataclass changes only, can proceed alongside T030-T032.
 - **Validation**:
   - [ ] All fields serialize to JSON correctly
-  - [ ] status_breakdown accurately reflects run statuses
-  - [ ] ISO 8601 timestamps are present in output
+  - [ ] `status_breakdown` accurately reflects run statuses
+  - [ ] ISO 8601 timestamps present in serialized output
+  - [ ] `data_freshness_sec` appears only when set (not null in JSON unless present)
 
-### Subtask T030 -- Structured JSON output for single-tenant training
+### Subtask T030 -- JSON Lines Event Emitter for Single-Tenant Training
 
-- **Purpose**: When `--mode cloud --tenant <id>` is used, print structured JSON to stdout showing the training result.
+- **Purpose**: When `--mode cloud --tenant <id>` is used, print structured JSON to stdout showing the complete training result. Support TTY detection and `--json` flag.
 - **Steps**:
-  1. Define a Pydantic model for the output schema (for validation and documentation):
+  1. Add `--json` flag to the train subparser (if not already added in WP01):
      ```python
-     # In training/output.py or cli.py:
-     from pydantic import BaseModel
-
-     class TrainingRunOutput(BaseModel):
-         tenant_id: str
-         status: str
-         sample_count: int
-         models_trained: list[str]
-         duration_sec: float
-         error_message: str | None = None
-         started_at: str | None = None
-         completed_at: str | None = None
+     train_parser.add_argument(
+         "--json", action="store_true", default=False,
+         help="Force compact JSON output (default for non-TTY)"
+     )
      ```
   2. In the CLI handler for `--tenant`:
      ```python
      if args.tenant:
          result = trainer.train_tenant(args.tenant)
-         output = result.to_dict()
 
-         if sys.stdout.isatty():
+         if sys.stdout.isatty() and not getattr(args, 'json', False):
              # Pretty-print for terminal
-             print(json.dumps(output, indent=2))
+             print(json.dumps(result.to_dict(), indent=2))
          else:
-             # Compact JSON for pipes
-             print(json.dumps(output))
+             # Compact JSON for pipes / --json flag
+             print(json.dumps(result.to_dict()))
 
          sys.exit(0 if result.status != "failed" else 1)
      ```
-  3. If a `--json` flag is provided, always output compact JSON regardless of TTY
-  4. Add `--json` flag to the train subcommand:
-     ```python
-     train_parser.add_argument("--json", action="store_true", help="Force JSON output")
-     ```
-- **Files**: `src/sigil_ml/cli.py`
+  3. The output must include ALL FR-008 fields: tenant_id, status, sample_count, models_trained, duration_ms, error_message (when applicable).
+- **Files**: `src/sigil_ml/cli.py` (modify, ~15 lines)
 - **Parallel?**: No -- modifies CLI output path.
 - **Validation**:
-  - [ ] Output is valid JSON
-  - [ ] Contains all required fields: tenant_id, status, sample_count, models_trained, duration_sec
+  - [ ] Output is valid JSON (parseable by `jq`)
+  - [ ] Contains all FR-008 fields
   - [ ] Pretty-printed when running in terminal
-  - [ ] Compact when piped (`sigil-ml train ... | jq .`)
-  - [ ] `--json` flag forces compact JSON
+  - [ ] Compact when piped: `sigil-ml train ... | jq .`
+  - [ ] `--json` flag forces compact JSON even in terminal
 
-### Subtask T031 -- Structured JSON summary for batch training
+### Subtask T031 -- Structured JSON Summary for Batch Training
 
-- **Purpose**: When `--mode cloud --all-tenants` is used, print a structured JSON summary with per-tenant details.
+- **Purpose**: When `--mode cloud --all-tenants` is used, print a structured JSON summary with per-tenant details and aggregate counts.
 - **Steps**:
-  1. The batch training already returns a `TrainingSummary`. Enhance the CLI output:
+  1. Enhance the CLI output in the `--all-tenants` handler:
      ```python
      elif args.all_tenants:
-         summary = trainer.train_all_tenants()
-         summary.compute_status_breakdown()
-         output = summary.to_dict()
+         batch = trainer.train_all_tenants()
 
-         if sys.stdout.isatty() and not args.json:
-             # Pretty-print for terminal with human-readable header
-             print(f"\n=== Training Summary ===")
-             print(f"Mode: {summary.mode}")
-             print(f"Tenants: {summary.total_tenants} total, "
-                   f"{summary.trained} trained, "
-                   f"{summary.skipped} skipped, "
-                   f"{summary.failed} failed")
-             print(f"Duration: {summary.total_duration_sec}s")
-             print(f"\nDetailed JSON:")
-             print(json.dumps(output, indent=2))
+         if sys.stdout.isatty() and not getattr(args, 'json', False):
+             # Human-readable header for terminal
+             print(f"\n=== Batch Training Summary ===")
+             print(f"Total tenants: {batch.total}")
+             print(f"  Trained: {batch.trained}")
+             print(f"  Skipped: {batch.skipped}")
+             print(f"  Failed:  {batch.failed}")
+             print(f"Duration: {batch.total_duration_ms}ms")
+             if batch.failed > 0:
+                 print(f"\nFailed tenants:")
+                 for run in batch.runs:
+                     if run.status == "failed":
+                         print(f"  - {run.tenant_id}: {run.error}")
+             print(f"\nFull JSON:")
+             print(json.dumps(batch.to_dict(), indent=2))
          else:
-             print(json.dumps(output))
+             print(json.dumps(batch.to_dict()))
 
-         sys.exit(0 if summary.failed == 0 else 1)
+         sys.exit(0 if batch.failed == 0 else 1)
      ```
-  2. The JSON output must include the full `runs` array with per-tenant details
-  3. The human-readable header provides a quick overview when running interactively
-- **Files**: `src/sigil_ml/cli.py`
+  2. The JSON output must include:
+     - `total`, `trained`, `skipped`, `failed` counts
+     - `status_breakdown` with per-status counts
+     - `total_duration_ms`
+     - `runs` array with full per-tenant `TrainingRun` details
+  3. Human-readable header provides a quick overview; full JSON follows for copy-paste.
+- **Files**: `src/sigil_ml/cli.py` (modify, ~25 lines)
 - **Parallel?**: No -- modifies CLI output path.
 - **Validation**:
   - [ ] JSON output includes `runs` array with all per-tenant results
   - [ ] `status_breakdown` shows counts per status type
-  - [ ] Human-readable header in terminal mode
+  - [ ] Human-readable header in terminal mode includes failed tenant details
   - [ ] Compact JSON when piped
-  - [ ] Per-tenant entries include all required fields (FR-008)
+  - [ ] Exit code follows strategy: 0 = no failures, 1 = any failure
 
-### Subtask T032 -- Structured JSON output for aggregate training
+### Subtask T032 -- Structured JSON Output for Aggregate Training
 
-- **Purpose**: When `--mode cloud --aggregate` is used, print a structured JSON summary showing the aggregate training result.
+- **Purpose**: When `--mode cloud --aggregate` is used, print a structured summary showing aggregate training results.
 - **Steps**:
-  1. In the CLI handler for `--aggregate`:
+  1. Enhance the CLI output in the `--aggregate` handler:
      ```python
      elif args.aggregate:
          result = trainer.train_aggregate()
-         summary = TrainingSummary(
-             mode="aggregate",
-             total_tenants=1,  # aggregate counts as one "tenant"
-             trained=1 if result.status == "trained" else 0,
-             skipped=1 if result.status.startswith("skipped") else 0,
-             failed=1 if result.status == "failed" else 0,
-             total_duration_sec=result.duration_sec,
-             runs=[result],
-         )
-         output = summary.to_dict()
 
-         if sys.stdout.isatty() and not args.json:
+         if sys.stdout.isatty() and not getattr(args, 'json', False):
              print(f"\n=== Aggregate Training Summary ===")
              print(f"Status: {result.status}")
              print(f"Samples: {result.sample_count}")
-             print(f"Models trained: {', '.join(result.models_trained)}")
-             print(f"Duration: {result.duration_sec}s")
-             if result.error_message:
-                 print(f"Note: {result.error_message}")
-             print(f"\nDetailed JSON:")
-             print(json.dumps(output, indent=2))
+             print(f"Models trained: {', '.join(result.models_trained) or 'none'}")
+             print(f"Duration: {result.duration_ms}ms")
+             if result.error:
+                 print(f"Note: {result.error}")
+             print(f"\nFull JSON:")
+             print(json.dumps(result.to_dict(), indent=2))
          else:
-             print(json.dumps(output))
+             print(json.dumps(result.to_dict()))
 
          sys.exit(0 if result.status != "failed" else 1)
      ```
-  2. The output should include the number of tenants whose data was pooled
-- **Files**: `src/sigil_ml/cli.py`
-- **Parallel?**: No -- modifies CLI output path.
+  2. The output should clearly show:
+     - Whether aggregate training succeeded or was skipped
+     - How many samples were used (after sampling)
+     - Which models were trained
+     - Any warnings (insufficient tenants)
+- **Files**: `src/sigil_ml/cli.py` (modify, ~15 lines)
+- **Parallel?**: Yes -- independent from T030/T031.
 - **Validation**:
-  - [ ] JSON output includes sample_count and models_trained
-  - [ ] Warning message appears if few tenants opted in
+  - [ ] JSON output includes `sample_count`, `models_trained`, `status`
+  - [ ] Warning appears when few tenants opted in (in `error` field)
   - [ ] Human-readable header in terminal mode
+  - [ ] Compact JSON when piped
 
-### Subtask T033 -- Audit event recording for all training modes
+### Subtask T033 -- Audit Event Recording for All Training Modes
 
-- **Purpose**: Ensure all training runs (single-tenant, batch, aggregate) record structured audit events via DataStore (FR-009).
+- **Purpose**: Ensure all training runs record structured audit events via DataStore (FR-009). Verify consistency across single-tenant, batch, and aggregate modes.
 - **Steps**:
-  1. Training events should already be recorded by `train_tenant()` (T012 in WP02). Verify this covers:
-     - Single-tenant training (via `--tenant`)
-     - Per-tenant training within a batch (via `--all-tenants`)
-  2. Add audit event recording to `train_aggregate()` (already included in WP05 T026, verify it's consistent):
+  1. **Single-tenant**: Already handled by T012 (WP02). Verify `record_training_event()` is called with:
      ```python
-     self.data_store.record_training_event(AGGREGATE_TENANT_ID, {
-         "kind": "aggregate_training",
-         "tenants_pooled": len(tenant_ids),
-         "sample_count": total_samples,
-         "models_trained": models_trained,
-         "duration_ms": int(elapsed * 1000),
-         "ts": int(time.time() * 1000),
-     })
+     {"kind": "training", "status": ..., "sample_count": ..., "models_trained": [...],
+      "duration_ms": ..., "ts": ...}
      ```
-  3. Add a batch-level audit event for `train_all_tenants()`:
+  2. **Batch-level**: Add a batch summary audit event at the end of `train_all_tenants()`:
      ```python
      # At end of train_all_tenants():
-     self.data_store.record_training_event("__batch__", {
-         "kind": "batch_training",
-         "total_tenants": summary.total_tenants,
-         "trained": summary.trained,
-         "skipped": summary.skipped,
-         "failed": summary.failed,
-         "duration_ms": int(summary.total_duration_sec * 1000),
-         "ts": int(time.time() * 1000),
-     })
+     try:
+         self.data_store.record_training_event("__batch__", {
+             "kind": "batch_training",
+             "total_tenants": batch.total,
+             "trained": batch.trained,
+             "skipped": batch.skipped,
+             "failed": batch.failed,
+             "duration_ms": batch.total_duration_ms,
+             "ts": int(time.time() * 1000),
+         })
+     except Exception:
+         logger.warning("Failed to record batch audit event", exc_info=True)
      ```
-  4. Audit events should use the existing `ml_events` table pattern:
-     - `kind`: "training" | "batch_training" | "aggregate_training"
+  3. **Aggregate**: Already handled by T026 (WP05). Verify `record_training_event()` is called with:
+     ```python
+     {"kind": "aggregate_training", "tenants_pooled": ..., "sample_count": ...,
+      "models_trained": [...], "duration_ms": ..., "ts": ...}
+     ```
+  4. All audit recording wrapped in try/except -- audit failures must NEVER crash the training run.
+  5. Event schema must be compatible with the existing `ml_events` table pattern from `TrainingScheduler._log_retrain()`:
+     - `kind`: identifies the event type
      - `endpoint`: "cloud_trainer"
      - `routing`: tenant_id or "__batch__" or "__aggregate__"
      - `latency_ms`: duration
-     - `ts`: unix timestamp in milliseconds
-  5. Audit events should be recorded EVEN on failure (with status in the event data)
-- **Files**: `src/sigil_ml/training/cloud_trainer.py`
+     - `ts`: unix epoch milliseconds
+- **Files**: `src/sigil_ml/training/cloud_trainer.py` (modify, ~15 lines)
 - **Parallel?**: Yes -- independent from output formatting.
 - **Validation**:
-  - [ ] Single-tenant training records an audit event
-  - [ ] Batch training records per-tenant events AND a batch-level event
-  - [ ] Aggregate training records an aggregate-level event
+  - [ ] Single-tenant training records an audit event (from WP02, verify still works)
+  - [ ] Batch training records per-tenant events AND a batch-level summary event
+  - [ ] Aggregate training records an aggregate-level event with `tenants_pooled`
   - [ ] Failed training still records an audit event with failure status
-  - [ ] Event schema matches `ml_events` table structure
+  - [ ] Audit recording failure does not crash the training run
 
 ---
 
 ## Risks & Mitigations
 
-| Risk | Mitigation |
-|------|-----------|
-| Output schema breaking monitoring | Define Pydantic models for validation; version the schema |
-| Mixing structured and log output | stdout for structured data, stderr for logs |
-| Large batch summaries | `--json` flag for compact output; summary header provides quick overview |
-| Audit event write failures | Catch and log, don't fail the training run |
-
----
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| Output schema changes breaking monitoring | Medium | Medium | Document JSON schema clearly; version if needed |
+| Mixing structured and log output | Low | Medium | stdout for structured data, stderr for logs (use logging module) |
+| Large batch summaries overwhelming terminals | Low | Low | Human-readable header provides summary; full JSON follows |
+| Audit event write failures | Low | Low | Catch and log; never crash the training run |
 
 ## Review Guidance
 
-- Key acceptance checkpoints:
-  1. All output is valid JSON (parseable by `jq`)
-  2. TTY detection works correctly (pretty vs compact)
-  3. `--json` flag forces compact JSON
-  4. Per-tenant details include all FR-008 fields: tenant_id, status, sample_count, models_trained, duration
-  5. Audit events recorded for all training modes
-  6. Failed training produces both output AND audit events
-  7. Exit codes follow the documented strategy (0=success, 1=failure)
-- Reviewers should run `sigil-ml train --mode cloud --all-tenants | jq .` and verify the output is valid JSON with the expected structure.
+- **Valid JSON**: Run `sigil-ml train --mode cloud --all-tenants | jq .` and verify parseable output.
+- **TTY detection**: Verify pretty-print in terminal, compact for pipes.
+- **`--json` flag**: Verify it forces compact JSON even in terminal.
+- **FR-008 completeness**: Verify per-tenant details include ALL required fields: tenant_id, status, sample_count, models_trained, duration_ms.
+- **Audit events**: Verify recorded for all three modes (single, batch, aggregate).
+- **Error resilience**: Verify audit recording failures are caught and logged, not propagated.
+- **Exit codes**: 0 = success/skip, 1 = any failure. Consistent across all modes.
 
 ---
 
 ## Activity Log
 
-- 2026-03-29T16:29:51Z -- system -- lane=planned -- Prompt created.
+- 2026-03-30T01:45:09Z -- system -- lane=planned -- Prompt regenerated.
