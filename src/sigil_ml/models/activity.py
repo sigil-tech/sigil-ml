@@ -104,6 +104,20 @@ class ActivityClassifier:
                 logger.warning("Failed to load activity classifier, using rules")
                 self._ml_model = None
 
+    @classmethod
+    def from_trained_model(
+        cls, model: SGDClassifier, store: ModelStore | None = None
+    ) -> ActivityClassifier:
+        """Create an instance from an already-trained sklearn model.
+
+        Use this instead of ``__new__`` to avoid bypassing ``__init__``.
+        """
+        instance = object.__new__(cls)
+        instance._store = store or LocalModelStore()
+        instance._ml_model = model
+        instance._trained = True
+        return instance
+
     @property
     def is_trained(self) -> bool:
         return self._trained

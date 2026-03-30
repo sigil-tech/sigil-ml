@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
 import numpy as np
 
@@ -44,6 +45,23 @@ class QualityEstimator:
         self.weights = dict(DEFAULT_WEIGHTS)
         self._load_weights()
 
+    @classmethod
+    def from_trained_model(
+        cls, weights: dict[str, int] | None = None, store: ModelStore | None = None
+    ) -> QualityEstimator:
+        """Create an instance from pre-configured weights.
+
+        Use this instead of ``__new__`` to avoid bypassing ``__init__``.
+
+        Args:
+            weights: Component weights dict. Uses DEFAULT_WEIGHTS if None.
+            store: Optional ModelStore for persistence.
+        """
+        instance = object.__new__(cls)
+        instance._store = store or LocalModelStore()
+        instance.weights = dict(weights if weights is not None else DEFAULT_WEIGHTS)
+        return instance
+
     def _load_weights(self) -> None:
         data = self._store.load("quality")
         if data is not None:
@@ -58,7 +76,7 @@ class QualityEstimator:
         data = json.dumps({"weights": self.weights}).encode("utf-8")
         self._store.save("quality", data)
 
-    def predict(self, features: dict) -> dict:
+    def predict(self, features: dict[str, float]) -> dict[str, Any]:
         """Compute quality score from rolling window features.
 
         Features:

@@ -49,6 +49,7 @@ class LocalModelStore:
         return self._base_dir / f"{model_name}.joblib"
 
     def load(self, model_name: str) -> bytes | None:
+        """Load model weights from disk. Returns None if the file does not exist."""
         path = self._path(model_name)
         if not path.exists():
             return None
@@ -59,11 +60,13 @@ class LocalModelStore:
             return None
 
     def save(self, model_name: str, data: bytes) -> None:
+        """Save model weights to disk, creating parent directories as needed."""
         path = self._path(model_name)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
 
     def exists(self, model_name: str) -> bool:
+        """Return True if the model weight file exists on disk."""
         return self._path(model_name).exists()
 
 
@@ -121,6 +124,7 @@ class S3ModelStore:
         return f"{self._tenant_id}/models/{model_name}/{version}/model.joblib"
 
     def load(self, model_name: str) -> bytes | None:
+        """Load model weights from S3 by resolving the latest version pointer."""
         try:
             # Read the latest pointer to get the version
             resp = self._s3.get_object(Bucket=self._bucket, Key=self._latest_key(model_name))
@@ -138,6 +142,7 @@ class S3ModelStore:
             return None
 
     def save(self, model_name: str, data: bytes) -> None:
+        """Save model weights to S3 with a timestamped version and update the latest pointer."""
         from datetime import datetime, timezone
 
         version = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -157,6 +162,7 @@ class S3ModelStore:
         )
 
     def exists(self, model_name: str) -> bool:
+        """Return True if a latest-version pointer exists for this model in S3."""
         try:
             self._s3.head_object(Bucket=self._bucket, Key=self._latest_key(model_name))
             return True
@@ -184,6 +190,7 @@ class CachedModelStore:
         self._lock = threading.Lock()
 
     def load(self, model_name: str) -> bytes | None:
+        """Load from cache if fresh, otherwise delegate to the inner store and cache the result."""
         now = time.monotonic()
         with self._lock:
             if model_name in self._cache:
@@ -204,12 +211,14 @@ class CachedModelStore:
         return data
 
     def save(self, model_name: str, data: bytes) -> None:
+        """Save to the inner store and update the cache."""
         self._inner.save(model_name, data)
         with self._lock:
             self._evict_if_full()
             self._cache[model_name] = (data, time.monotonic())
 
     def exists(self, model_name: str) -> bool:
+        """Check cache first; fall back to inner store if not cached or expired."""
         with self._lock:
             if model_name in self._cache:
                 _, cached_at = self._cache[model_name]
