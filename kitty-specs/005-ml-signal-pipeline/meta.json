@@ -1,0 +1,9 @@
+{
+  "feature_number": "005",
+  "slug": "005-ml-signal-pipeline",
+  "feature_slug": "005-ml-signal-pipeline",
+  "friendly_name": "ml signal pipeline",
+  "mission": "software-dev",
+  "target_branch": "main",
+  "created_at": "2026-03-30T18:03:19.572821+00:00"
+}
