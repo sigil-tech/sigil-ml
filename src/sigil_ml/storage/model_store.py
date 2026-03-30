@@ -91,7 +91,7 @@ class S3ModelStore:
             raise ImportError(
                 "boto3 is required for S3 model storage. "
                 "Install with: pip install sigil-ml[cloud]"
-            )
+            ) from None
 
         boto_config = BotoConfig(
             connect_timeout=5,
@@ -115,7 +115,7 @@ class S3ModelStore:
         except Exception as e:
             raise ValueError(
                 f"S3 bucket '{self._bucket}' is not accessible: {e}"
-            )
+            ) from e
 
     def _latest_key(self, model_name: str) -> str:
         return f"{self._tenant_id}/models/{model_name}/latest"

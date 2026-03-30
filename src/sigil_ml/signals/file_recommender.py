@@ -223,6 +223,7 @@ class FileRecommender:
     def save(self, model_store: ModelStore) -> None:
         """Persist co-occurrence matrix via ModelStore."""
         import io
+
         import joblib
         data = {
             "cooccurrence": dict(self._cooccurrence),
@@ -243,6 +244,7 @@ class FileRecommender:
         if raw is None:
             return False
         import io
+
         import joblib
         try:
             data = joblib.load(io.BytesIO(raw))

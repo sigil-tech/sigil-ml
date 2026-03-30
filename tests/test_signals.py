@@ -13,17 +13,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from sigil_ml.features import extract_action_token, infer_tool
-from sigil_ml.signals import Signal
 from sigil_ml.signals.engine import (
     SIGNAL_TOTAL_MAX,
-    SIGNAL_TYPE_COOLDOWN_SEC,
     SignalEngine,
 )
 from sigil_ml.signals.file_recommender import FileRecommender
 from sigil_ml.signals.next_action import NextActionPredictor
 from sigil_ml.signals.pattern_detector import PatternDetector
 from sigil_ml.signals.profile import BehaviorProfile, RollingStat
-
 
 # ---------------------------------------------------------------------------
 # RollingStat

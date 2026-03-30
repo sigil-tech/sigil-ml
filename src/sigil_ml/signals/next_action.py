@@ -191,6 +191,7 @@ class NextActionPredictor:
     def save(self, model_store: ModelStore) -> None:
         """Persist n-gram tables via ModelStore."""
         import io
+
         import joblib
         data = {
             "ngrams": dict(self._ngrams),  # Convert defaultdict to regular dict
@@ -211,6 +212,7 @@ class NextActionPredictor:
         if raw is None:
             return False
         import io
+
         import joblib
         try:
             data = joblib.load(io.BytesIO(raw))

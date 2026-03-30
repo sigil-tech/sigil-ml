@@ -15,13 +15,12 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 
 from sigil_ml.training.models import (
@@ -1083,7 +1082,7 @@ class TestCLICloudFlags:
         import subprocess
 
         result = subprocess.run(
-            [".venv/bin/python", "-m", "sigil_ml.cli", "train", "--mode", "cloud"],
+            [sys.executable, "-m", "sigil_ml.cli", "train", "--mode", "cloud"],
             capture_output=True,
             text=True,
         )
@@ -1096,7 +1095,7 @@ class TestCLICloudFlags:
 
         result = subprocess.run(
             [
-                ".venv/bin/python", "-m", "sigil_ml.cli",
+                sys.executable, "-m", "sigil_ml.cli",
                 "train", "--mode", "cloud",
                 "--tenant", "t1", "--all-tenants",
             ],
@@ -1113,7 +1112,7 @@ class TestCLICloudFlags:
         env = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")}
         result = subprocess.run(
             [
-                ".venv/bin/python", "-m", "sigil_ml.cli",
+                sys.executable, "-m", "sigil_ml.cli",
                 "train", "--mode", "cloud", "--tenant", "t1",
             ],
             capture_output=True,
@@ -1128,7 +1127,7 @@ class TestCLICloudFlags:
         import subprocess
 
         result = subprocess.run(
-            [".venv/bin/python", "-m", "sigil_ml.cli", "train", "--help"],
+            [sys.executable, "-m", "sigil_ml.cli", "train", "--help"],
             capture_output=True,
             text=True,
         )

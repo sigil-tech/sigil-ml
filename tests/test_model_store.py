@@ -7,10 +7,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from sigil_ml.storage.model_store import CachedModelStore, LocalModelStore
-
 
 # ---------------------------------------------------------------------------
 # LocalModelStore round-trip

@@ -11,10 +11,10 @@ from pydantic import BaseModel, Field
 
 from sigil_ml.config import ServingMode
 from sigil_ml.features import extract_duration_features, extract_stuck_features
-from sigil_ml.models.stuck import StuckPredictor
-from sigil_ml.models.workflow import WorkflowStatePredictor
 from sigil_ml.models.duration import DurationEstimator
 from sigil_ml.models.quality import QualityEstimator
+from sigil_ml.models.stuck import StuckPredictor
+from sigil_ml.models.workflow import WorkflowStatePredictor
 from sigil_ml.plugins import fetch_capabilities
 from sigil_ml.tenant import TenantContext, make_tenant_dependency
 from sigil_ml.training.trainer import Trainer

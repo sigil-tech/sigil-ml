@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from sigil_ml.signals.engine import SignalEngine
@@ -141,11 +142,11 @@ def create_app(mode: ServingMode | None = None) -> FastAPI:
             state.load_models(ms)
 
             # Initialize signal pipeline (additive, does not modify existing models)
-            from sigil_ml.signals.profile import BehaviorProfile
-            from sigil_ml.signals.pattern_detector import PatternDetector
-            from sigil_ml.signals.next_action import NextActionPredictor
-            from sigil_ml.signals.file_recommender import FileRecommender
             from sigil_ml.signals.engine import SignalEngine
+            from sigil_ml.signals.file_recommender import FileRecommender
+            from sigil_ml.signals.next_action import NextActionPredictor
+            from sigil_ml.signals.pattern_detector import PatternDetector
+            from sigil_ml.signals.profile import BehaviorProfile
 
             profile = BehaviorProfile()
             pattern_detector = PatternDetector()

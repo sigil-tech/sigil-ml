@@ -215,8 +215,8 @@ class CloudTrainer:
 
         # Next-action predictor -- synthetic
         try:
-            from sigil_ml.training.synthetic import generate_next_action_data
             from sigil_ml.signals.next_action import NextActionPredictor
+            from sigil_ml.training.synthetic import generate_next_action_data
 
             sequences = generate_next_action_data(500)
             predictor = NextActionPredictor()

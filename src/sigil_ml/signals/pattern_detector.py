@@ -191,6 +191,7 @@ class PatternDetector:
         if self._isolation_forest is None:
             return
         import io
+
         import joblib
         buf = io.BytesIO()
         joblib.dump(self._isolation_forest, buf)
@@ -202,6 +203,7 @@ class PatternDetector:
         if data is None:
             return False
         import io
+
         import joblib
         self._isolation_forest = joblib.load(io.BytesIO(data))
         self._is_trained = True
