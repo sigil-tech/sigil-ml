@@ -120,3 +120,16 @@ def aws_region() -> str | None:
 def model_cache_ttl() -> float:
     """Return the model cache TTL in seconds. Default 300."""
     return float(os.environ.get("SIGIL_MODEL_CACHE_TTL", "300"))
+
+
+import re
+
+_TENANT_ID_RE = re.compile(r"^[a-z0-9_-]{1,63}$")
+
+
+def validate_tenant_id(tenant_id: str) -> bool:
+    """Return True if tenant_id matches the allowed format.
+
+    Valid: 1-63 characters of lowercase alphanumeric, hyphens, underscores.
+    """
+    return bool(_TENANT_ID_RE.match(tenant_id))

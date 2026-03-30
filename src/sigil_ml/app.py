@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI
 
@@ -109,17 +110,12 @@ def create_app(mode: ServingMode | None = None) -> FastAPI:
     if mode is None:
         mode = resolve_mode()  # reads SIGIL_ML_MODE env var, defaults to LOCAL
 
-    application = FastAPI(
-        title="sigil-ml",
-        version="0.1.0",
-        description=f"Sigil ML sidecar ({mode.value} mode)",
-    )
     state = AppState(mode=mode)
 
-    register_routes(application, state)
-
-    @application.on_event("startup")
-    async def startup_event() -> None:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Manage startup and shutdown lifecycle for the application."""
+        # --- Startup ---
         if state.mode == ServingMode.LOCAL:
             store = create_store()
             state.store = store
@@ -168,14 +164,24 @@ def create_app(mode: ServingMode | None = None) -> FastAPI:
             state.model_loader = FilesystemModelLoader()
             logger.info("sigil-ml: cloud mode -- stateless serving, cache and loader initialized")
 
-    @application.on_event("shutdown")
-    async def shutdown_event() -> None:
+        yield
+
+        # --- Shutdown ---
         if state.poller:
             state.poller.stop()
             logger.info("poller stopped")
         if state.store:
             state.store.close()
             logger.info("store connection closed")
+
+    application = FastAPI(
+        title="sigil-ml",
+        version="0.1.0",
+        description=f"Sigil ML sidecar ({mode.value} mode)",
+        lifespan=lifespan,
+    )
+
+    register_routes(application, state)
 
     return application
 

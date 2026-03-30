@@ -232,10 +232,7 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
             if model is None:
                 return FALLBACK_STUCK
 
-            # Use wrapper to get prediction from resolved model
-            predictor = StuckPredictor.__new__(StuckPredictor)
-            predictor.model = model
-            predictor._trained = True
+            predictor = StuckPredictor.from_trained_model(model)
             result = predictor.predict(req.features)
             return StuckResponse(**result)
 
@@ -271,14 +268,10 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
 
             model = state.resolve_model(tenant.tenant_id, "workflow")
             if model is None:
-                # Use rules-based fallback via a fresh predictor
-                predictor = WorkflowStatePredictor.__new__(WorkflowStatePredictor)
-                predictor._ml_model = None
-                predictor._trained = False
+                # Use rules-based fallback via a fresh predictor (no model store load)
+                predictor = WorkflowStatePredictor()
             else:
-                predictor = WorkflowStatePredictor.__new__(WorkflowStatePredictor)
-                predictor._ml_model = model
-                predictor._trained = True
+                predictor = WorkflowStatePredictor.from_trained_model(model)
 
             session_info = {
                 "session_elapsed_min": 0.0,
@@ -337,10 +330,7 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
             if model is None:
                 return FALLBACK_DURATION
 
-            # Use wrapper to get prediction from resolved model
-            predictor = DurationEstimator.__new__(DurationEstimator)
-            predictor.model = model
-            predictor._trained = True
+            predictor = DurationEstimator.from_trained_model(model)
             result = predictor.predict(req.features)
             return DurationResponse(**result)
 
@@ -368,14 +358,7 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
         if state.mode == ServingMode.CLOUD:
             state.count_request(tenant.tenant_id)
             # Quality is rule-based, no per-tenant model needed
-            estimator = QualityEstimator.__new__(QualityEstimator)
-            estimator.weights = {
-                "test_pass_rate": 30,
-                "edit_focus": 20,
-                "velocity_vs_baseline": 20,
-                "commit_frequency": 15,
-                "no_revert_penalty": 15,
-            }
+            estimator = QualityEstimator.from_trained_model()
             result = estimator.predict(req.features)
             return QualityResponse(
                 score=result["score"],

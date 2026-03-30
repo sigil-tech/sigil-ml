@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import time
+from typing import Any
 
 from sigil_ml.features import (
     extract_duration_features,
@@ -31,7 +32,7 @@ QUALITY_TTL_SEC = 120  # 2-minute expiry for quality
 class EventPoller:
     """Polls sigild's events table and writes predictions to ml_predictions."""
 
-    def __init__(self, store: DataStore, models: dict) -> None:
+    def __init__(self, store: DataStore, models: dict[str, Any]) -> None:
         self.store = store
         self.stuck = models["stuck"]
         self.activity = models["activity"]

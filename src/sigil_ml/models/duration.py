@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import logging
+from typing import Any
 
 import joblib
 import numpy as np
@@ -38,11 +39,25 @@ class DurationEstimator:
                 logger.warning("Failed to load duration model, starting fresh")
                 self.model = None
 
+    @classmethod
+    def from_trained_model(
+        cls, model: GradientBoostingRegressor, store: ModelStore | None = None
+    ) -> DurationEstimator:
+        """Create an instance from an already-trained sklearn model.
+
+        Use this instead of ``__new__`` to avoid bypassing ``__init__``.
+        """
+        instance = object.__new__(cls)
+        instance._store = store or LocalModelStore()
+        instance.model = model
+        instance._trained = True
+        return instance
+
     @property
     def is_trained(self) -> bool:
         return self._trained
 
-    def predict(self, features: dict) -> dict:
+    def predict(self, features: dict[str, float]) -> dict[str, Any]:
         """Predict task duration from feature dict.
 
         Returns:

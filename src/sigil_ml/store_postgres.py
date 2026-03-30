@@ -34,6 +34,14 @@ class PostgresStore:
                 "Install with: pip install sigil-ml[cloud]"
             ) from None
 
+        from sigil_ml.config import validate_tenant_id
+
+        if not validate_tenant_id(tenant):
+            raise ValueError(
+                f"Invalid tenant ID '{tenant}'. "
+                "Must be 1-63 characters of lowercase alphanumeric, hyphens, or underscores."
+            )
+
         self._connection_url = connection_url
         self._tenant = tenant
         self._conn = None
@@ -291,3 +299,58 @@ class PostgresStore:
                 "VALUES (%s, %s, %s, %s, %s)",
                 (kind, endpoint, routing, latency_ms, int(time.time() * 1000)),
             )
+
+    # --- Cloud training methods ---
+
+    def get_last_training_ts(self, tenant_id: str) -> float | None:
+        """Return the last training timestamp (epoch ms) for a tenant, or None."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MAX(ts) FROM ml_events WHERE kind = 'training' AND routing = %s",
+                (tenant_id,),
+            )
+            row = cur.fetchone()
+            return float(row[0]) if row and row[0] is not None else None
+
+    def get_completed_tasks_for_tenant(self, tenant_id: str) -> list[dict]:
+        """Return completed tasks for a specific tenant."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM tasks WHERE completed_at IS NOT NULL ORDER BY completed_at DESC"
+            )
+            if cur.description is None:
+                return []
+            columns = [desc[0] for desc in cur.description]
+            return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    def get_events_for_task_id(self, task_id: str) -> list[dict]:
+        """Return events associated with a specific task ID."""
+        return self.get_events_for_task(task_id)
+
+    def get_all_tenant_ids(self) -> list[str]:
+        """Return all known tenant IDs from the information schema."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT schema_name FROM information_schema.schemata "
+                "WHERE schema_name NOT IN ('public', 'information_schema', 'pg_catalog', 'pg_toast')"
+            )
+            return [row[0] for row in cur.fetchall()]
+
+    def get_opted_in_tenant_ids(self) -> list[str]:
+        """Return tenant IDs opted in to aggregate data pooling.
+
+        Placeholder: returns all tenant IDs until an opt-in mechanism is implemented.
+        """
+        return self.get_all_tenant_ids()
+
+    def record_training_run(self, tenant_id: str, status: str, duration_ms: int) -> None:
+        """Record a training run audit entry for a tenant."""
+        self.insert_ml_event(
+            kind="training",
+            endpoint="cloud_trainer",
+            routing=tenant_id,
+            latency_ms=duration_ms,
+        )

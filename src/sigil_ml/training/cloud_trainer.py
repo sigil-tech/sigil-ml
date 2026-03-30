@@ -188,10 +188,7 @@ class CloudTrainer:
         # Stuck predictor -- synthetic
         try:
             X_stuck, y_stuck = generate_stuck_data(500)
-            stuck = StuckPredictor.__new__(StuckPredictor)
-            stuck._store = self.model_store
-            stuck.model = None
-            stuck._trained = False
+            stuck = StuckPredictor(model_store=self.model_store)
             stuck.train(X_stuck, y_stuck)
             self._save_model_to_store("stuck", stuck, tenant_id)
             models_trained.append("stuck")
@@ -205,10 +202,7 @@ class CloudTrainer:
         # Duration estimator -- synthetic
         try:
             X_dur, y_dur = generate_duration_data(500)
-            duration = DurationEstimator.__new__(DurationEstimator)
-            duration._store = self.model_store
-            duration.model = None
-            duration._trained = False
+            duration = DurationEstimator(model_store=self.model_store)
             duration.train(X_dur, y_dur)
             self._save_model_to_store("duration", duration, tenant_id)
             models_trained.append("duration")
@@ -255,12 +249,9 @@ class CloudTrainer:
             if X_stuck_list:
                 X_stuck = np.array(X_stuck_list)
                 y_stuck = np.array(y_stuck_list)
-                stuck_model = StuckPredictor.__new__(StuckPredictor)
-                stuck_model._store = self.model_store
-                stuck_model.model = None
-                stuck_model._trained = False
-                stuck_model.train(X_stuck, y_stuck)
-                self._save_model_to_store("stuck", stuck_model, tenant_id)
+                stuck_predictor = StuckPredictor(model_store=self.model_store)
+                stuck_predictor.train(X_stuck, y_stuck)
+                self._save_model_to_store("stuck", stuck_predictor, tenant_id)
                 models_trained.append("stuck")
         except Exception:
             logger.warning(
@@ -290,12 +281,9 @@ class CloudTrainer:
             if X_dur_list:
                 X_dur = np.array(X_dur_list)
                 y_dur = np.array(y_dur_list)
-                dur_model = DurationEstimator.__new__(DurationEstimator)
-                dur_model._store = self.model_store
-                dur_model.model = None
-                dur_model._trained = False
-                dur_model.train(X_dur, y_dur)
-                self._save_model_to_store("duration", dur_model, tenant_id)
+                dur_estimator = DurationEstimator(model_store=self.model_store)
+                dur_estimator.train(X_dur, y_dur)
+                self._save_model_to_store("duration", dur_estimator, tenant_id)
                 models_trained.append("duration")
         except Exception:
             logger.warning(
@@ -611,44 +599,19 @@ class CloudTrainer:
                 exc_info=True,
             )
 
-    def _get_last_training_ts(self, tenant_id: str) -> int | None:
+    def _get_last_training_ts(self, tenant_id: str) -> float | None:
         """Get the last training timestamp for a tenant.
 
         Returns epoch milliseconds, or None if never trained.
-        Delegates to DataStore if it supports the method; returns None otherwise.
         """
-        try:
-            return self.data_store.get_last_training_ts(tenant_id)  # type: ignore[attr-defined]
-        except AttributeError:
-            # DataStore doesn't have this method -- assume never trained
-            return None
+        return self.data_store.get_last_training_ts(tenant_id)
 
     def _query_completed_tasks(self, tenant_id: str) -> list[dict]:
-        """Query completed tasks for a tenant.
-
-        Adapts to whatever completed-task query the DataStore supports.
-        """
-        try:
-            return self.data_store.query_completed_tasks(tenant_id)  # type: ignore[attr-defined]
-        except AttributeError:
-            # Fallback: use existing DataStore methods
-            task_ids = self.data_store.get_completed_task_ids()
-            tasks = []
-            for tid in task_ids:
-                task = self.data_store.get_task_by_id(tid)
-                if task is not None:
-                    tasks.append(task)
-            return tasks
+        """Query completed tasks for a tenant via the DataStore protocol."""
+        return self.data_store.get_completed_tasks_for_tenant(tenant_id)
 
     def _query_events_for_task(
         self, tenant_id: str, task_id: str
     ) -> list[dict]:
-        """Query events for a specific task.
-
-        Adapts to whatever event query the DataStore supports.
-        """
-        try:
-            return self.data_store.query_events_for_task(tenant_id, task_id)  # type: ignore[attr-defined]
-        except AttributeError:
-            # Fallback: use existing DataStore method
-            return self.data_store.get_events_for_task(task_id)
+        """Query events for a specific task via the DataStore protocol."""
+        return self.data_store.get_events_for_task_id(task_id)
