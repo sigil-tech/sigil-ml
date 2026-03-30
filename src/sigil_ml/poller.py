@@ -32,13 +32,15 @@ QUALITY_TTL_SEC = 120  # 2-minute expiry for quality
 class EventPoller:
     """Polls sigild's events table and writes predictions to ml_predictions."""
 
-    def __init__(self, store: DataStore, models: dict[str, Any]) -> None:
+    def __init__(self, store: DataStore, models: dict[str, Any],
+                 signal_engine: Any | None = None) -> None:
         self.store = store
         self.stuck = models["stuck"]
         self.activity = models["activity"]
         self.workflow = models["workflow"]
         self.duration = models["duration"]
         self.quality = models["quality"]
+        self.signal_engine = signal_engine  # Optional: None when not configured
         self._buffer: list[dict] = []
         self._since_last_predict = 0
         self._last_predict_time = 0.0
@@ -96,6 +98,15 @@ class EventPoller:
             self._last_predict_time = time.time()
 
         self.store.commit()
+
+        # --- Signal detection (additive, does not affect predictions) ---
+        if self.signal_engine is not None:
+            try:
+                task_id = self.store.get_active_task()
+                task_context = {"task_id": task_id} if task_id else None
+                self.signal_engine.process_events(self._buffer, task_context)
+            except Exception:
+                logger.debug("poller: signal engine error (non-fatal)", exc_info=True)
 
     # Fallback predictions for untrained models.
     _FALLBACK_STUCK = {"probability": 0.5, "confidence": "weak"}
@@ -161,6 +172,16 @@ class EventPoller:
         qfeats = self._quality_features()
         result = self.quality.predict(qfeats)
         self.store.insert_prediction("quality", result, result.get("score", 50) / 100.0, QUALITY_TTL_SEC)
+
+        # Write behavior profile (signal pipeline)
+        if self.signal_engine is not None:
+            try:
+                profile_data = self.signal_engine.profile.to_dict()
+                self.store.insert_prediction("profile", profile_data, 1.0, None)
+                # Refresh dismissed signal types while we're here
+                self.signal_engine.refresh_dismissed_types()
+            except Exception:
+                logger.debug("poller: profile write failed (non-fatal)", exc_info=True)
 
         # Audit log
         latency_ms = int((time.time() - start) * 1000)

@@ -25,6 +25,7 @@ __all__ = [
     "PatternDetector",
     "RollingStat",
     "Signal",
+    "SignalEngine",
 ]
 
 
@@ -39,6 +40,9 @@ def __getattr__(name: str):  # noqa: N807
     if name == "FileRecommender":
         from sigil_ml.signals.file_recommender import FileRecommender
         return FileRecommender
+    if name == "SignalEngine":
+        from sigil_ml.signals.engine import SignalEngine
+        return SignalEngine
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

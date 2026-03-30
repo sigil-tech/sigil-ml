@@ -37,6 +37,7 @@ class AppState:
         self.duration: DurationEstimator | None = None
         self.quality: QualityEstimator | None = None
         self.poller: EventPoller | None = None
+        self.signal_engine: Any = None
         self.training_in_progress: bool = False
         # Cloud-mode fields (initialized by cloud startup path)
         self.model_cache: Any = None
@@ -62,6 +63,10 @@ class AppState:
             self.poller.workflow = self.workflow
             self.poller.duration = self.duration
             self.poller.quality = self.quality
+        if self.signal_engine and self.model_store:
+            self.signal_engine.pattern_detector.load(self.model_store)
+            self.signal_engine.next_action.load(self.model_store)
+            self.signal_engine.file_recommender.load(self.model_store)
         logger.info("models reloaded into poller")
 
     def resolve_model(self, tenant_id: str, model_name: str) -> Any | None:
@@ -132,6 +137,32 @@ def create_app(mode: ServingMode | None = None) -> FastAPI:
 
             state.load_models(ms)
 
+            # Initialize signal pipeline (additive, does not modify existing models)
+            from sigil_ml.signals.profile import BehaviorProfile
+            from sigil_ml.signals.pattern_detector import PatternDetector
+            from sigil_ml.signals.next_action import NextActionPredictor
+            from sigil_ml.signals.file_recommender import FileRecommender
+            from sigil_ml.signals.engine import SignalEngine
+
+            profile = BehaviorProfile()
+            pattern_detector = PatternDetector()
+            next_action_predictor = NextActionPredictor()
+            file_recommender = FileRecommender()
+
+            # Load persisted signal models
+            next_action_predictor.load(ms)
+            file_recommender.load(ms)
+            pattern_detector.load(ms)
+
+            signal_engine = SignalEngine(
+                store=store,
+                profile=profile,
+                pattern_detector=pattern_detector,
+                next_action=next_action_predictor,
+                file_recommender=file_recommender,
+            )
+            state.signal_engine = signal_engine
+
             state.poller = EventPoller(
                 store=store,
                 models={
@@ -141,6 +172,7 @@ def create_app(mode: ServingMode | None = None) -> FastAPI:
                     "duration": state.duration,
                     "quality": state.quality,
                 },
+                signal_engine=signal_engine,
             )
             asyncio.create_task(state.poller.run())
 

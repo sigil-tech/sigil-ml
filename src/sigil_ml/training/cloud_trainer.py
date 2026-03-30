@@ -213,6 +213,33 @@ class CloudTrainer:
                 exc_info=True,
             )
 
+        # Next-action predictor -- synthetic
+        try:
+            from sigil_ml.training.synthetic import generate_next_action_data
+            from sigil_ml.signals.next_action import NextActionPredictor
+
+            sequences = generate_next_action_data(500)
+            predictor = NextActionPredictor()
+            for seq in sequences:
+                predictor.train_incremental(seq)
+
+            buf = io.BytesIO()
+            data = {
+                "ngrams": dict(predictor._ngrams),
+                "total_tokens": predictor._total_tokens,
+                "n": predictor._n,
+            }
+            joblib.dump(data, buf)
+            scoped_name = f"{tenant_id}/next_action"
+            self.model_store.save(scoped_name, buf.getvalue())
+            models_trained.append("next_action")
+        except Exception:
+            logger.warning(
+                "Failed to train synthetic next_action for tenant %s",
+                tenant_id,
+                exc_info=True,
+            )
+
         return models_trained
 
     def _train_models_from_tasks(
@@ -302,6 +329,80 @@ class CloudTrainer:
 
         # --- Quality estimator ---
         # Uses weight-based scoring. Skip training; default weights apply.
+
+        # --- Signal models (additive) ---
+
+        # Next-Action Predictor: rebuild n-grams from task event sequences
+        try:
+            from sigil_ml.features import extract_action_token
+            from sigil_ml.models.activity import ActivityClassifier
+            from sigil_ml.signals.next_action import NextActionPredictor
+
+            predictor = NextActionPredictor()
+            predictor.reset()
+            total_tokens = 0
+
+            classifier = ActivityClassifier(model_store=self.model_store)
+            for task in tasks:
+                events = task_events.get(task["id"], [])
+                for e in events:
+                    if "_category" not in e:
+                        result = classifier.classify(e)
+                        e["_category"] = result["category"]
+                tokens = [extract_action_token(e) for e in events]
+                predictor.train_incremental(tokens)
+                total_tokens += len(tokens)
+
+            if total_tokens > 0:
+                buf = io.BytesIO()
+                data = {
+                    "ngrams": dict(predictor._ngrams),
+                    "total_tokens": predictor._total_tokens,
+                    "n": predictor._n,
+                }
+                joblib.dump(data, buf)
+                scoped_name = f"{tenant_id}/next_action"
+                self.model_store.save(scoped_name, buf.getvalue())
+                models_trained.append("next_action")
+        except Exception:
+            logger.warning(
+                "Failed to train next_action model for tenant %s",
+                tenant_id, exc_info=True,
+            )
+
+        # File Recommender: rebuild co-occurrence from task file sets
+        try:
+            from sigil_ml.signals.file_recommender import FileRecommender
+
+            recommender = FileRecommender()
+            for task in tasks:
+                events = task_events.get(task["id"], [])
+                files = recommender._extract_files_from_events(events)
+                if len(files) < 2:
+                    continue
+                recommender._task_count += 1
+                for f in files:
+                    recommender._file_counts[f] += 1
+                    for g in files:
+                        if f != g:
+                            recommender._cooccurrence[f][g] += 1
+
+            if recommender._task_count >= 5:
+                buf = io.BytesIO()
+                data = {
+                    "cooccurrence": dict(recommender._cooccurrence),
+                    "file_counts": dict(recommender._file_counts),
+                    "task_count": recommender._task_count,
+                }
+                joblib.dump(data, buf)
+                scoped_name = f"{tenant_id}/file_recommender"
+                self.model_store.save(scoped_name, buf.getvalue())
+                models_trained.append("file_recommender")
+        except Exception:
+            logger.warning(
+                "Failed to train file_recommender model for tenant %s",
+                tenant_id, exc_info=True,
+            )
 
         return models_trained
 

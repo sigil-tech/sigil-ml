@@ -46,6 +46,31 @@ class Trainer:
             trained.append("duration")
             total_samples += duration_result
 
+        # Signal model training (additive)
+        try:
+            pattern_result = self._train_pattern_detector()
+            if pattern_result:
+                trained.append("pattern_detector")
+                total_samples += pattern_result
+        except Exception:
+            logger.warning("Signal model training failed: pattern_detector", exc_info=True)
+
+        try:
+            next_action_result = self._train_next_action()
+            if next_action_result:
+                trained.append("next_action")
+                total_samples += next_action_result
+        except Exception:
+            logger.warning("Signal model training failed: next_action", exc_info=True)
+
+        try:
+            recommender_result = self._train_file_recommender()
+            if recommender_result:
+                trained.append("file_recommender")
+                total_samples += recommender_result
+        except Exception:
+            logger.warning("Signal model training failed: file_recommender", exc_info=True)
+
         elapsed = time.time() - start
         return {
             "trained": trained,
@@ -117,3 +142,128 @@ class Trainer:
         estimator = DurationEstimator(model_store=self._model_store)
         estimator.train(X, y)
         return len(X)
+
+    # --- Signal model training (WP07) ---
+
+    def _train_pattern_detector(self) -> int:
+        """Train the PatternDetector's IsolationForest from feedback labels.
+
+        Returns:
+            Number of samples used, or 0 if insufficient data.
+        """
+        feedback = self.store.get_signal_feedback(since_ms=0)
+
+        if len(feedback) < 500:
+            logger.info(
+                "Not enough feedback for pattern detector training (%d, need 500)",
+                len(feedback),
+            )
+            return 0
+
+        # Build feature matrix from signal evidence
+        X_list: list[list[float]] = []
+        for fb in feedback:
+            try:
+                evidence = fb.get("evidence") or {}
+                if isinstance(evidence, str):
+                    import json
+                    evidence = json.loads(evidence)
+                features = self._extract_pattern_features(evidence)
+                if features is not None:
+                    X_list.append(features)
+            except Exception:
+                continue
+
+        if len(X_list) < 100:
+            logger.info("Not enough valid pattern features (%d)", len(X_list))
+            return 0
+
+        X = np.array(X_list)
+
+        from sigil_ml.signals.pattern_detector import PatternDetector
+        detector = PatternDetector()
+        detector.train(X, np.zeros(len(X)))  # IsolationForest is unsupervised
+        detector.save(self._model_store)
+
+        return len(X)
+
+    def _extract_pattern_features(self, evidence: dict) -> list[float] | None:
+        """Extract a feature vector from signal evidence for IsolationForest training."""
+        source = evidence.get("source_model")
+        if source != "pattern_detector":
+            return None
+
+        observed = evidence.get("observed")
+        baseline_mean = evidence.get("baseline_mean")
+        baseline_std = evidence.get("baseline_std")
+        z_score = evidence.get("z_score")
+
+        if any(v is None for v in [observed, baseline_mean, baseline_std, z_score]):
+            return None
+
+        return [float(observed), float(baseline_mean), float(baseline_std), float(z_score)]
+
+    def _train_next_action(self) -> int:
+        """Rebuild n-gram model from completed task event sequences.
+
+        Returns:
+            Number of tokens processed, or 0 if insufficient data.
+        """
+        task_ids = self.store.get_completed_task_ids()
+
+        if len(task_ids) < 10:
+            logger.info(
+                "Not enough completed tasks for next-action training (%d, need 10)",
+                len(task_ids),
+            )
+            return 0
+
+        from sigil_ml.features import extract_action_token
+        from sigil_ml.signals.next_action import NextActionPredictor
+
+        predictor = NextActionPredictor()
+        predictor.reset()  # Start fresh for full rebuild
+        total_tokens = 0
+
+        for task_id in task_ids:
+            events = self.store.get_events_for_task(task_id)
+            if not events:
+                continue
+
+            # Classify events (needed for composite tokens)
+            from sigil_ml.models.activity import ActivityClassifier
+            classifier = ActivityClassifier(model_store=self._model_store)
+            for e in events:
+                if "_category" not in e:
+                    result = classifier.classify(e)
+                    e["_category"] = result["category"]
+
+            tokens = [extract_action_token(e) for e in events]
+            predictor.train_incremental(tokens)
+            total_tokens += len(tokens)
+
+        if total_tokens > 0:
+            predictor.save(self._model_store)
+
+        return total_tokens
+
+    def _train_file_recommender(self) -> int:
+        """Rebuild co-occurrence matrix from completed task file sets.
+
+        Returns:
+            Number of tasks processed, or 0 if insufficient data.
+        """
+        from sigil_ml.signals.file_recommender import FileRecommender
+
+        recommender = FileRecommender()
+        task_count = recommender.train_from_tasks(self.store)
+
+        if task_count < 5:
+            logger.info(
+                "Not enough tasks with file data for recommender training (%d, need 5)",
+                task_count,
+            )
+            return 0
+
+        recommender.save(self._model_store)
+        return task_count
