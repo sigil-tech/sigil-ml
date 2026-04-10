@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import math
 import time
+from typing import Any
+
 from sigil_ml.store import DataStore
 
 # --- Activity classification features ---
@@ -325,3 +327,104 @@ def extract_workflow_features(classified_events: list[dict], session_info: dict)
     features["test_failures"] = float(session_info.get("test_failures", 0))
 
     return features
+
+
+# ---------------------------------------------------------------------------
+# Cloud-mode feature extractors: accept pre-queried data (task dict + events)
+# instead of a DataStore + task_id. Produce identical output to the DataStore-
+# based extractors above.
+# ---------------------------------------------------------------------------
+
+
+def extract_stuck_features_from_data(
+    task: dict[str, Any], events: list[dict[str, Any]]
+) -> dict[str, float]:
+    """Extract stuck features from pre-queried task and events data.
+
+    Same output as extract_stuck_features() but operates on passed-in
+    data instead of querying a DataStore. For use with DataStore in cloud mode.
+    """
+    now_ms = int(time.time() * 1000)
+    started_at = task.get("started_at", now_ms)
+    last_active = task.get("last_active", now_ms)
+    session_length_sec = max((last_active - started_at) / 1000.0, 1.0)
+    test_failure_count = float(task.get("test_fails", 0) or 0)
+
+    # Time in current phase: approximate from last phase-change event or started_at
+    phase_start = started_at
+    for ev in events:
+        if ev.get("kind") == "phase_change":
+            phase_start = ev.get("ts", phase_start)
+    time_in_phase_sec = (now_ms - phase_start) / 1000.0
+
+    # Edit velocity: count edit events
+    edit_events = [e for e in events if e.get("kind") in ("edit", "file_edit", "save")]
+    edit_count = len(edit_events)
+    session_minutes = max(session_length_sec / 60.0, 1 / 60.0)
+    edit_velocity = edit_count / session_minutes
+
+    # File switch rate: distinct files / total edits
+    files_in_edits: set[str] = set()
+    for ev in edit_events:
+        payload = ev.get("payload")
+        if isinstance(payload, dict) and "file" in payload:
+            files_in_edits.add(payload["file"])
+    file_switch_rate = len(files_in_edits) / max(edit_count, 1)
+
+    # Time since last commit
+    commit_events = [e for e in events if e.get("kind") == "commit"]
+    if commit_events:
+        last_commit_ts = max(e.get("ts", 0) for e in commit_events)
+        time_since_last_commit_sec = (now_ms - last_commit_ts) / 1000.0
+    else:
+        time_since_last_commit_sec = session_length_sec
+
+    return {
+        "test_failure_count": test_failure_count,
+        "time_in_phase_sec": time_in_phase_sec,
+        "edit_velocity": edit_velocity,
+        "file_switch_rate": file_switch_rate,
+        "session_length_sec": session_length_sec,
+        "time_since_last_commit_sec": time_since_last_commit_sec,
+    }
+
+
+def extract_duration_features_from_data(
+    task: dict[str, Any], events: list[dict[str, Any]]
+) -> dict[str, float]:
+    """Extract duration features from pre-queried data.
+
+    Same output as extract_duration_features() but operates on passed-in
+    data instead of querying a DataStore. For use with DataStore in cloud mode.
+    """
+    # File count
+    files_map = task.get("files")
+    if isinstance(files_map, str):
+        try:
+            files_map = json.loads(files_map)
+        except (json.JSONDecodeError, TypeError):
+            files_map = {}
+    file_count = float(len(files_map)) if isinstance(files_map, dict) else 0.0
+
+    # Total edits from events
+    total_edits = float(
+        len([e for e in events if e.get("kind") in ("edit", "file_edit", "save")])
+    )
+
+    # Time of day
+    started_at = task.get("started_at")
+    if started_at:
+        hour = time.localtime(started_at / 1000.0).tm_hour
+    else:
+        hour = time.localtime().tm_hour
+
+    # Branch name length
+    branch = task.get("branch") or ""
+    branch_name_length = float(len(branch))
+
+    return {
+        "file_count": file_count,
+        "total_edits": total_edits,
+        "time_of_day_hour": float(hour),
+        "branch_name_length": branch_name_length,
+    }
