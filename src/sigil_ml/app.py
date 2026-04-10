@@ -20,6 +20,7 @@ from sigil_ml.models.quality import QualityEstimator
 from sigil_ml.models.stuck import StuckPredictor
 from sigil_ml.models.workflow import WorkflowStatePredictor
 from sigil_ml.poller import EventPoller
+from sigil_ml.models.fleet_routes import register_fleet_routes
 from sigil_ml.routes import register_routes
 from sigil_ml.storage.model_store import ModelStore, model_store_factory
 from sigil_ml.store import DataStore, create_store
@@ -219,6 +220,7 @@ def create_app(mode: ServingMode | None = None) -> FastAPI:
     )
 
     register_routes(application, state)
+    register_fleet_routes(application, state)
 
     return application
 
