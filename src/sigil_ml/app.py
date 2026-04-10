@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from sigil_ml.feature_store import SigilFeatureStore
     from sigil_ml.signals.engine import SignalEngine
 
 from fastapi import FastAPI
@@ -16,11 +17,11 @@ from fastapi import FastAPI
 from sigil_ml.config import ServingMode, resolve_mode
 from sigil_ml.models.activity import ActivityClassifier
 from sigil_ml.models.duration import DurationEstimator
+from sigil_ml.models.fleet_routes import register_fleet_routes
 from sigil_ml.models.quality import QualityEstimator
 from sigil_ml.models.stuck import StuckPredictor
 from sigil_ml.models.workflow import WorkflowStatePredictor
 from sigil_ml.poller import EventPoller
-from sigil_ml.models.fleet_routes import register_fleet_routes
 from sigil_ml.routes import register_routes
 from sigil_ml.storage.model_store import ModelStore, model_store_factory
 from sigil_ml.store import DataStore, create_store
@@ -44,6 +45,8 @@ class AppState:
         self.poller: EventPoller | None = None
         self.signal_engine: SignalEngine | None = None
         self.training_in_progress: bool = False
+        # Feast feature store (optional — graceful fallback when unavailable)
+        self.feature_store: SigilFeatureStore | None = None
         # Cloud-mode fields (initialized by cloud startup path)
         self.model_cache: Any = None
         self.model_loader: Any = None
@@ -143,6 +146,17 @@ def create_app(mode: ServingMode | None = None) -> FastAPI:
 
             state.load_models(ms)
 
+            # Initialize Feast feature store (additive — works without it)
+            try:
+                from sigil_ml.feature_store import SigilFeatureStore
+
+                fs = SigilFeatureStore()
+                fs.apply()
+                state.feature_store = fs
+                logger.info("sigil-ml: Feast feature store initialized")
+            except Exception:
+                logger.warning("Feast feature store not available, features must be sent in requests", exc_info=False)
+
             # Initialize signal pipeline (additive, does not modify existing models)
             from sigil_ml.signals.engine import SignalEngine
             from sigil_ml.signals.file_recommender import FileRecommender
@@ -179,6 +193,7 @@ def create_app(mode: ServingMode | None = None) -> FastAPI:
                     "quality": state.quality,
                 },
                 signal_engine=signal_engine,
+                feature_store=state.feature_store,
             )
             asyncio.create_task(state.poller.run())
 
@@ -201,6 +216,19 @@ def create_app(mode: ServingMode | None = None) -> FastAPI:
             state.model_cache = create_model_cache()
             state.model_loader = FilesystemModelLoader()
             logger.info("sigil-ml: cloud mode -- stateless serving, cache and loader initialized")
+
+            # Initialize Feast feature store for cloud mode (additive — works without it)
+            try:
+                from sigil_ml.feature_store import SigilFeatureStore
+
+                fs = SigilFeatureStore()
+                fs.apply()
+                state.feature_store = fs
+                logger.info("sigil-ml: Feast feature store initialized (cloud mode)")
+            except Exception:
+                logger.warning(
+                    "Feast feature store not available, features must be sent in requests", exc_info=False
+                )
 
         yield
 

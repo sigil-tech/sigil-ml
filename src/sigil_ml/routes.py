@@ -207,13 +207,12 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
         if state.mode == ServingMode.CLOUD:
             state.count_request(tenant.tenant_id)
             if req.features is None:
-                if req.task_id is not None:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Cloud mode requires 'features' in request body. "
-                        "'task_id' lookup is not available without SQLite.",
-                    )
-                return FALLBACK_STUCK
+                if req.task_id and state.feature_store:
+                    req.features = state.feature_store.get_stuck_features(req.task_id)
+                elif req.task_id and state.store:
+                    req.features = extract_stuck_features(state.store, req.task_id)
+                else:
+                    return FALLBACK_STUCK
 
             model = state.resolve_model(tenant.tenant_id, "stuck")
             if model is None:
@@ -223,12 +222,14 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
             result = predictor.predict(req.features)
             return StuckResponse(**result)
 
-        # Local mode: unchanged
+        # Local mode: features may come from explicit payload, Feast, or direct store
         if state.stuck is None:
             return StuckResponse(probability=0.5, confidence="weak")
 
         if req.features is not None:
             features = req.features
+        elif req.task_id and state.feature_store:
+            features = state.feature_store.get_stuck_features(req.task_id)
         elif req.task_id is not None:
             features = extract_stuck_features(state.store, req.task_id)
         else:
@@ -304,13 +305,12 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
         if state.mode == ServingMode.CLOUD:
             state.count_request(tenant.tenant_id)
             if req.features is None:
-                if req.task_id is not None:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Cloud mode requires 'features' in request body. "
-                        "'task_id' lookup is not available without SQLite.",
-                    )
-                return FALLBACK_DURATION
+                if req.task_id and state.feature_store:
+                    req.features = state.feature_store.get_duration_features(req.task_id)
+                elif req.task_id and state.store:
+                    req.features = extract_duration_features(state.store, req.task_id)
+                else:
+                    return FALLBACK_DURATION
 
             model = state.resolve_model(tenant.tenant_id, "duration")
             if model is None:
@@ -320,12 +320,14 @@ def register_routes(fastapi_app: FastAPI, state: AppState) -> None:
             result = predictor.predict(req.features)
             return DurationResponse(**result)
 
-        # Local mode: unchanged
+        # Local mode: features may come from explicit payload, Feast, or direct store
         if state.duration is None:
             return DurationResponse(estimated_minutes=60.0, confidence_interval=[30.0, 90.0])
 
         if req.features is not None:
             features = req.features
+        elif req.task_id and state.feature_store:
+            features = state.feature_store.get_duration_features(req.task_id)
         elif req.task_id is not None:
             features = extract_duration_features(state.store, req.task_id)
         else:

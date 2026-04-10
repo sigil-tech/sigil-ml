@@ -22,6 +22,9 @@ from sigil_ml.features import (
 )
 from sigil_ml.store import DataStore
 
+if TYPE_CHECKING:
+    from sigil_ml.feature_store import SigilFeatureStore
+
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SEC = 0.5
@@ -35,7 +38,13 @@ QUALITY_TTL_SEC = 120  # 2-minute expiry for quality
 class EventPoller:
     """Polls sigild's events table and writes predictions to ml_predictions."""
 
-    def __init__(self, store: DataStore, models: dict[str, Any], signal_engine: SignalEngine | None = None) -> None:
+    def __init__(
+        self,
+        store: DataStore,
+        models: dict[str, Any],
+        signal_engine: SignalEngine | None = None,
+        feature_store: SigilFeatureStore | None = None,
+    ) -> None:
         self.store = store
         self.stuck = models["stuck"]
         self.activity = models["activity"]
@@ -43,6 +52,7 @@ class EventPoller:
         self.duration = models["duration"]
         self.quality = models["quality"]
         self.signal_engine = signal_engine  # Optional: None when not configured
+        self.feature_store = feature_store  # Optional: None when Feast is unavailable
         self._buffer: list[dict] = []
         self._since_last_predict = 0
         self._last_predict_time = 0.0
@@ -145,6 +155,13 @@ class EventPoller:
         else:
             result = self._FALLBACK_STUCK
         self.store.insert_prediction("stuck", result, result.get("probability", 0.5), PREDICTION_TTL_SEC)
+
+        # Materialize features into Feast online store for future entity-based lookups.
+        if task_id and self.feature_store is not None:
+            try:
+                self.feature_store.materialize_task(self.store, task_id)
+            except Exception:
+                logger.debug("poller: feast materialization failed (non-fatal)", exc_info=True)
 
         # Activity summary — classify and summarize the buffer.
         activity_result = self._activity_summary()
