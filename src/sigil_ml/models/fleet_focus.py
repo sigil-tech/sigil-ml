@@ -15,13 +15,6 @@ from sigil_ml.storage.model_store import LocalModelStore, ModelStore
 
 logger = logging.getLogger(__name__)
 
-FEATURE_NAMES = [
-    "hour",
-    "day_of_week",
-    "meeting_minutes",
-    "context_switches",
-]
-
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 

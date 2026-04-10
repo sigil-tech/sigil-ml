@@ -51,15 +51,25 @@ MODEL_NAMES = {"focus", "meeting", "onboarding"}
 def register_fleet_routes(fastapi_app: FastAPI, state: AppState) -> None:
     """Register fleet model training and prediction routes."""
 
-    def _get_model(model_name: str, team_id: int):
+    # Cache model instances to avoid reloading from disk on every request.
+    _cache: dict[str, FleetFocusModel | FleetMeetingModel | FleetOnboardingModel] = {}
+
+    def _get_model(model_name: str, team_id: int, *, force_reload: bool = False):
+        key = f"{model_name}_{team_id}"
+        if not force_reload and key in _cache:
+            return _cache[key]
+
         store = state.model_store
         if model_name == "focus":
-            return FleetFocusModel(team_id, model_store=store)
+            m = FleetFocusModel(team_id, model_store=store)
         elif model_name == "meeting":
-            return FleetMeetingModel(team_id, model_store=store)
+            m = FleetMeetingModel(team_id, model_store=store)
         elif model_name == "onboarding":
-            return FleetOnboardingModel(team_id, model_store=store)
-        raise HTTPException(status_code=404, detail=f"Unknown fleet model: {model_name}")
+            m = FleetOnboardingModel(team_id, model_store=store)
+        else:
+            raise HTTPException(status_code=404, detail=f"Unknown fleet model: {model_name}")
+        _cache[key] = m
+        return m
 
     @fastapi_app.post("/fleet/train/{model_name}", response_model=FleetTrainResponse)
     async def fleet_train(model_name: str, req: FleetTrainRequest) -> FleetTrainResponse:
@@ -67,7 +77,7 @@ def register_fleet_routes(fastapi_app: FastAPI, state: AppState) -> None:
         if model_name not in MODEL_NAMES:
             raise HTTPException(status_code=404, detail=f"Unknown fleet model: {model_name}")
 
-        model = _get_model(model_name, req.team_id)
+        model = _get_model(model_name, req.team_id, force_reload=True)
         try:
             result = model.train(req.data)
         except ValueError as e:
@@ -98,11 +108,13 @@ def register_fleet_routes(fastapi_app: FastAPI, state: AppState) -> None:
             )
 
         preds = model.predict()
-        samples = preds.pop("samples", 0)
+        samples = preds.get("samples", 0)
+        # Build predictions dict without the samples key.
+        predictions = {k: v for k, v in preds.items() if k != "samples"}
         return FleetPredictResponse(
             model=f"fleet_{model_name}",
             team_id=team_id,
-            predictions=preds,
+            predictions=predictions,
             samples=samples,
         )
 
