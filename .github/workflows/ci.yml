@@ -139,6 +139,23 @@ jobs:
         run: |
           sigil-ml health-check 2>&1 && exit 1 || echo "Expected failure — server not running"
 
+  openapi:
+    name: OpenAPI Spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Verify OpenAPI spec is up to date
+        run: make openapi-check
+
   build:
     runs-on: ubuntu-latest
     steps:
